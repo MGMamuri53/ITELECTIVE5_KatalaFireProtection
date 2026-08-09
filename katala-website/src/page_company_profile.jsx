@@ -1,0 +1,12 @@
+import {Nav,Footer,Card} from './components'
+import shield from './assets/icons/shield.png'
+import verified from './assets/icons/verified.png'
+import medal from './assets/icons/medal.png'
+import setting from './assets/icons/setting.png'
+import chat from './assets/icons/live-chat.png'
+import './company_overrides.css'
+
+export default function Company(){
+  const values=[[shield,'Safety','Absolute priority in all environments.'],[verified,'Reliability','Consistent performance under pressure.'],[medal,'Quality','Excellence in materials and execution.'],[setting,'Professionalism','Expertise-driven technical conduct.'],[chat,'Customer Care','Responsive, dedicated support.']]
+  return <><Nav active="company"/><main><section className="company-hero"><div className="shell"><h1>Safeguarding Lives and Assets</h1><p>Katala Fire Protection Product Trading is a premier provider of life-safety equipment and highly engineered fire suppression solutions, dedicated to uncompromising reliability.</p></div></section><section className="section"><div className="shell origin"><h2>Our Origin</h2><div><p>Founded on the principle of absolute structural integrity and uncompromising safety, Katala emerged as a critical response to the growing demand for dependable, industrial-grade fire protection systems in modern facilities.</p><p>We don't just sell equipment; we engineer peace of mind through rigorous testing, certified deployment, and steadfast maintenance protocols.</p></div></div></section><section className="section wash"><div className="shell mission-grid"><Card title="Mission">To deliver highly engineered, rigorously tested fire protection solutions that unequivocally safeguard human life, protect critical infrastructure, and ensure uninterrupted operational continuity for our clients.</Card><Card title="Vision">To be the industry's standard-bearer for technical excellence and reliability in fire safety engineering across the region, recognized for our unwavering commitment to quality and precision.</Card></div></section><section className="section values"><div className="shell"><h2 className="section-title">Core Values</h2><p className="section-copy">The principles that govern our engineering and service operations.</p><div className="value-grid">{values.map(([icon,title,copy])=><div className="value" key={title}><img src={icon} alt=""/><b>{title}</b><small>{copy}</small></div>)}</div></div></section></main><Footer/></>
+}
