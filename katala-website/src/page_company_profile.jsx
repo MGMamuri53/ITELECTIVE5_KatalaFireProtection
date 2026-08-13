@@ -1,12 +1,67 @@
-import {Nav,Footer,Card} from './components'
-import shield from './assets/icons/shield.png'
-import verified from './assets/icons/verified.png'
-import medal from './assets/icons/medal.png'
-import setting from './assets/icons/setting.png'
-import chat from './assets/icons/live-chat.png'
-import './company_overrides.css'
+import { Nav, Footer, PageIntro, InfoNote } from './components'
+import { company, registrationNotes } from './data/company'
 
-export default function Company(){
-  const values=[[shield,'Safety','Absolute priority in all environments.'],[verified,'Reliability','Consistent performance under pressure.'],[medal,'Quality','Excellence in materials and execution.'],[setting,'Professionalism','Expertise-driven technical conduct.'],[chat,'Customer Care','Responsive, dedicated support.']]
-  return <><Nav active="company"/><main><section className="company-hero"><div className="shell"><h1>Safeguarding Lives and Assets</h1><p>Katala Fire Protection Product Trading is a premier provider of life-safety equipment and highly engineered fire suppression solutions, dedicated to uncompromising reliability.</p></div></section><section className="section"><div className="shell origin"><h2>Our Origin</h2><div><p>Founded on the principle of absolute structural integrity and uncompromising safety, Katala emerged as a critical response to the growing demand for dependable, industrial-grade fire protection systems in modern facilities.</p><p>We don't just sell equipment; we engineer peace of mind through rigorous testing, certified deployment, and steadfast maintenance protocols.</p></div></div></section><section className="section wash"><div className="shell mission-grid"><Card title="Mission">To deliver highly engineered, rigorously tested fire protection solutions that unequivocally safeguard human life, protect critical infrastructure, and ensure uninterrupted operational continuity for our clients.</Card><Card title="Vision">To be the industry's standard-bearer for technical excellence and reliability in fire safety engineering across the region, recognized for our unwavering commitment to quality and precision.</Card></div></section><section className="section values"><div className="shell"><h2 className="section-title">Core Values</h2><p className="section-copy">The principles that govern our engineering and service operations.</p><div className="value-grid">{values.map(([icon,title,copy])=><div className="value" key={title}><img src={icon} alt=""/><b>{title}</b><small>{copy}</small></div>)}</div></div></section></main><Footer/></>
+export default function Company() {
+  return (
+    <>
+      <Nav active="company" />
+      <main>
+        <PageIntro eyebrow="COMPANY PROFILE" title="A family-owned fire protection business serving facility needs">
+          Katala began as a family-owned business in 2022 in Dasmariñas, Cavite, guided by the purpose “Your Protection Is Our Concern.”
+        </PageIntro>
+
+        <section className="section">
+          <div className="shell company-story-grid">
+            <div>
+              <span className="eyebrow">OUR STORY</span>
+              <h2>Local fire protection support with a practical service approach</h2>
+            </div>
+            <div className="prose">
+              <p>Katala Fire Protection Product Trading supports customers through fire protection product supply, system-related services, project work, and preventive maintenance.</p>
+              <p>The business focuses on responsive customer support, product quality, repeat business, and long-term client relationships while continuing to expand its project experience.</p>
+            </div>
+          </div>
+        </section>
+
+        <section className="section surface">
+          <div className="shell mission-grid">
+            <article className="statement-card">
+              <span className="eyebrow">VISION</span>
+              <h2>Grow into a trusted fire protection brand for homes, facilities, and industry.</h2>
+              <p>Katala aims to expand its reach while building recognition for dependable fire protection products and services.</p>
+            </article>
+            <article className="statement-card">
+              <span className="eyebrow">MISSION</span>
+              <h2>Provide safety, security, and service through quality fire protection solutions.</h2>
+              <p>The company supports customers through product supply, project coordination, and fire protection service work.</p>
+            </article>
+          </div>
+        </section>
+
+        <section className="section">
+          <div className="shell">
+            <div className="section-heading">
+              <span className="eyebrow">BUSINESS REGISTRATION</span>
+              <h2>Registration information</h2>
+              <p>Key business registration documents can be reviewed as part of supplier accreditation or procurement requirements.</p>
+            </div>
+            <div className="registration-grid">
+              {registrationNotes.map((item) => <article key={item.title}><h3>{item.title}</h3><p>{item.detail}</p></article>)}
+            </div>
+            <InfoNote title="For procurement and accreditation">
+              Request the latest business permit, registration documents, and any project-specific technical certificates directly from Katala before final supplier approval.
+            </InfoNote>
+          </div>
+        </section>
+
+        <section className="section contact-section">
+          <div className="shell contact-panel">
+            <div><span className="eyebrow">CONTACT</span><h2>Talk directly with Katala</h2><p>{company.address}</p></div>
+            <div className="contact-actions"><a className="btn primary" href={`mailto:${company.email}`}>{company.email}</a><a className="btn secondary" href={`tel:${company.phone.replace(/[^\d+]/g, '')}`}>{company.phone}</a></div>
+          </div>
+        </section>
+      </main>
+      <Footer />
+    </>
+  )
 }

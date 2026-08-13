@@ -1,18 +1,87 @@
-import {Nav,Footer,Card} from './components'
-import hero from './assets/pictures/download (1).jpg'
-import verified from './assets/icons/verified.png'
-import setting from './assets/icons/setting.png'
-import security from './assets/icons/security.png'
-import chat from './assets/icons/live-chat.png'
-import extinguisher from './assets/icons/fire-extinguisher.png'
-import bell from './assets/icons/bell.png'
-import drop from './assets/icons/drop.png'
+import { Nav, Footer, InfoNote } from './components'
+import { company, serviceLines } from './data/company'
+import hero from './assets/icons/fire.png'
+import project from './assets/icons/signal.png'
 
-export default function Home(){
-  const stats=[[verified,'SEC Registered'],[setting,'PCAB Licensed'],[security,'BFP Standard'],[chat,'24/7 Support']]
-  return <><Nav/><main>
-    <section className="hero-home"><div className="shell hero-grid"><div><span className="eyebrow">ENGINEERED LIFE SAFETY</span><h1>Total Protection,<br/>Uncompromising<br/>Reliability</h1><p>Delivering professional fire safety services and precision-engineered suppression systems for industrial, commercial, and high-risk environments.</p><div className="actions"><a href="mailto:info@katala.com?subject=Request%20a%20Quote" className="btn-red">Request Quote &rarr;</a><a href="#services" className="btn-outline">Explore Services</a></div></div><img className="hero-photo" src={hero} alt="Industrial fire suppression system"/></div></section>
-    <div className="shell stats">{stats.map(([icon,label])=><div key={label}><img className="stat-icon" src={icon} alt=""/>{label}</div>)}</div>
-    <section className="section wash equipment-section"><div className="shell"><div className="equipment-rule"><span/></div><h2 className="section-title">Precision Equipment</h2><p className="section-copy">Industrial-grade fire safety products engineered for maximum reliability in critical situations.</p><div className="cards equipment-cards"><Card icon={<img src={extinguisher} alt=""/>} title="Extinguishers" link="View Specifications">Comprehensive range of ABC Dry Chemical, CO2, and specialized extinguishing units for all fire classes.</Card><Card icon={<img src={bell} alt=""/>} title="Alarm Systems" link="View Specifications">Addressable and conventional fire detection panels, sensors, and notification appliances.</Card><Card icon={<img src={drop} alt=""/>} title="Suppression Systems" link="View Specifications">Engineered clean agent, water mist, and foam suppression systems for critical infrastructure.</Card></div></div></section>
-  </main><Footer/></>
+export default function Home() {
+  return (
+    <>
+      <Nav />
+      <main>
+        <section className="home-hero">
+          <div className="shell hero-grid">
+            <div className="hero-copy">
+              <span className="eyebrow">FIRE PROTECTION PRODUCT TRADING</span>
+              <h1>Practical fire protection for real facilities.</h1>
+              <p>{company.tagline} Katala supports product supply, fire alarm work, sprinkler systems, pump installations, and preventive maintenance for facility requirements.</p>
+              <div className="hero-actions">
+                <a className="btn primary" href="#products">Browse Products</a>
+                <a className="btn secondary" href="#services">Explore Services</a>
+              </div>
+              <div className="hero-contact">
+                <span>{company.phone}</span>
+                <span>{company.email}</span>
+              </div>
+            </div>
+            <div className="hero-media">
+              <img src={hero} alt="Katala fire protection equipment" />
+              <div className="media-caption">Fire protection products and project support</div>
+            </div>
+          </div>
+        </section>
+
+        <section className="trust-strip">
+          <div className="shell trust-grid">
+            <div><strong>2022</strong><span>Family-owned business roots</span></div>
+            <div><strong>Cavite</strong><span>Based in Dasmariñas</span></div>
+            <div><strong>Products</strong><span>Fire protection equipment and accessories</span></div>
+            <div><strong>Services</strong><span>Systems, installation, and maintenance support</span></div>
+          </div>
+        </section>
+
+        <section className="section">
+          <div className="shell">
+            <div className="section-heading split-heading">
+              <div>
+                <span className="eyebrow">WHAT KATALA OFFERS</span>
+                <h2>Fire protection products and service support</h2>
+              </div>
+              <p>Choose the service area that matches your facility requirement, then send Katala the project details for review.</p>
+            </div>
+            <div className="service-grid compact">
+              {serviceLines.map((item, index) => (
+                <article className="service-tile" key={item.title}>
+                  <span className="service-number">{String(index + 1).padStart(2, '0')}</span>
+                  <h3>{item.title}</h3>
+                  <p>{item.copy}</p>
+                  <small>{item.proof}</small>
+                </article>
+              ))}
+            </div>
+          </div>
+        </section>
+
+        <section className="section surface">
+          <div className="shell evidence-grid">
+            <img src={project} alt="Fire alarm system project" />
+            <div>
+              <span className="eyebrow">PROJECT EXPERIENCE</span>
+              <h2>See examples of Katala’s completed project work.</h2>
+              <p>Browse selected fire alarm, preventive maintenance, and fire pump projects completed for commercial and institutional clients.</p>
+              <a className="text-link" href="#portfolio">View projects →</a>
+            </div>
+          </div>
+        </section>
+
+        <section className="section">
+          <div className="shell">
+            <InfoNote title="Need a quotation or service review?">
+              Create a customer account, add the products you need to a quotation cart, or submit a service request with your project details.
+            </InfoNote>
+          </div>
+        </section>
+      </main>
+      <Footer />
+    </>
+  )
 }
