@@ -6,13 +6,15 @@ import Products from './page_products'
 import Services from './page_services'
 import Portfolio from './page_portfolio'
 import Company from './page_company_profile'
+import Signup from './page_signup'
+import Signin from './page_signin'
 
-const routes = { products: Products, services: Services, portfolio: Portfolio, company: Company }
+const routes = { products: Products, services: Services, portfolio: Portfolio, company: Company, signup: Signup, signin: Signin }
 
 export default function App() {
-  const [page, setPage] = useState(() => location.hash.slice(1) || 'home')
+  const [page, setPage] = useState(() => location.hash.slice(1) || 'signup')
   useEffect(() => {
-    const sync = () => setPage(location.hash.slice(1) || 'home')
+    const sync = () => setPage(location.hash.slice(1) || 'signup')
     addEventListener('hashchange', sync)
     return () => removeEventListener('hashchange', sync)
   }, [])

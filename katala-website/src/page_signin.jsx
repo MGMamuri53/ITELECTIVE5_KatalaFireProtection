@@ -1,0 +1,6 @@
+import building from './assets/pictures/download.jpg'
+import fire from './assets/icons/fire.png'
+import './signup.css'
+
+export default function Signin(){const submit=e=>{e.preventDefault();location.hash='home'};return <main className="auth-page"><section className="auth-visual" style={{backgroundImage:`url(${building})`}}><div className="visual-copy"><div className="auth-brand"><img src={fire} alt=""/>Katala FireSafe</div><p>Engineering Life Safety.</p></div></section><section className="auth-form-side"><div className="signup-box signin-box"><a className="auth-home" href="#home">Katala FireSafe</a><h1>Welcome Back</h1><p className="auth-intro">Sign in to manage quotations, compliance reports, and service requests.</p><div className="progress step-1"><span/><span/></div><form noValidate onSubmit={submit}><Field label="Work Email" type="email" placeholder="jane.doe@company.com"/><Field label="Password" type="password" placeholder="••••••••"/><button className="continue" type="submit">Sign in &nbsp;&rarr;</button></form><p className="signin-link">Need an account? <a href="#signup">Create one</a></p></div></section></main>}
+function Field({label,...props}){return <label className="field"><span>{label}</span><input {...props}/></label>}
