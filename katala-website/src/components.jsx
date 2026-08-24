@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import logo from './assets/icons/fire.png'
 import { company } from './data/company'
 import { authApi, getStoredSession } from './services/katalaApi'
@@ -43,14 +43,14 @@ export function Nav({ active = '' }) {
             </a>
           ))}
           {session?.token ? (
-            <button className="nav-account-action mobile-account" type="button" onClick={signOut}>Sign out</button>
+            <AccountMenu className="mobile-account" session={session} onSignOut={signOut} onNavigate={() => setOpen(false)} />
           ) : (
             <a className="mobile-account" href="#signin" onClick={() => setOpen(false)}>Sign in</a>
           )}
         </nav>
         <a className="nav-quote" href="#products">Request Quote</a>
         {session?.token ? (
-          <button className="nav-account-action desktop-account" type="button" onClick={signOut} title={session.user?.email || 'Signed in'}>Sign out</button>
+          <AccountMenu className="desktop-account" session={session} onSignOut={signOut} />
         ) : (
           <a className="nav-signin desktop-account" href="#signin">Sign in</a>
         )}
@@ -59,6 +59,54 @@ export function Nav({ active = '' }) {
         </button>
       </div>
     </header>
+  )
+}
+
+function AccountMenu({ className = '', session, onSignOut, onNavigate }) {
+  const [open, setOpen] = useState(false)
+  const menuRef = useRef(null)
+  const accountName = session.user?.name || session.user?.email || 'Account'
+
+  useEffect(() => {
+    function closeFromOutside(event) {
+      if (menuRef.current && !menuRef.current.contains(event.target)) setOpen(false)
+    }
+
+    document.addEventListener('mousedown', closeFromOutside)
+    return () => document.removeEventListener('mousedown', closeFromOutside)
+  }, [])
+
+  function navigate() {
+    setOpen(false)
+    onNavigate?.()
+  }
+
+  async function signOut() {
+    setOpen(false)
+    await onSignOut()
+  }
+
+  return (
+    <div className={`account-menu ${className}`} ref={menuRef}>
+      <button
+        className="nav-account-trigger"
+        type="button"
+        onClick={() => setOpen((current) => !current)}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        title={session.user?.email || 'Signed in'}
+      >
+        <span className="account-avatar" aria-hidden="true">{accountName.charAt(0).toUpperCase()}</span>
+        <span className="account-trigger-label">{accountName}</span>
+        <span className="account-caret" aria-hidden="true">v</span>
+      </button>
+      <div className={`account-dropdown ${open ? 'open' : ''}`} role="menu">
+        <a href="#profile" role="menuitem" onClick={navigate}>Profile</a>
+        <a href="#admin" role="menuitem" onClick={navigate}>Admin page</a>
+        <a href="#staff-work-queue" role="menuitem" onClick={navigate}>Staff portal</a>
+        <button type="button" role="menuitem" onClick={signOut}>Sign out</button>
+      </div>
+    </div>
   )
 }
 

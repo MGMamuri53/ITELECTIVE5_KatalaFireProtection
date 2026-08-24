@@ -1,5 +1,5 @@
 
-import { Package, Wrench, ClipboardList, Calendar, TrendingUp } from 'lucide-react';
+import { Globe2, Package, Wrench, Users, TrendingUp } from 'lucide-react';
 import Layout from './Layout';
 
 const MetricCard = ({ label, value, icon: Icon, colorClass, trend }) => (
@@ -28,10 +28,10 @@ function Dashboard({ onNavigate }) {
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
-        <MetricCard label="Total Active Products" value="1,284" icon={Package} colorClass="text-slate-400" trend="4.2%" />
-        <MetricCard label="Total Services" value="456" icon={Wrench} colorClass="text-slate-400" trend="1.8%" />
-        <MetricCard label="New Quotations" value="89" icon={ClipboardList} colorClass="text-[#b3000c]" />
-        <MetricCard label="Pending Service Reqs" value="24" icon={Calendar} colorClass="text-amber-500" />
+        <MetricCard label="Managed Accounts" value="140" icon={Users} colorClass="text-slate-400" trend="4.2%" />
+        <MetricCard label="Material SKUs" value="1,284" icon={Package} colorClass="text-[#b3000c]" />
+        <MetricCard label="Active Services" value="18" icon={Wrench} colorClass="text-slate-400" trend="1.8%" />
+        <MetricCard label="Website Updates" value="6" icon={Globe2} colorClass="text-amber-500" />
       </div>
     </Layout>
   );

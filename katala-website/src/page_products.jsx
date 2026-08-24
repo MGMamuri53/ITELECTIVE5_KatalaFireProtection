@@ -3,10 +3,10 @@ import { Nav, Footer, PageIntro, InfoNote } from './components'
 import { catalog, categories } from './data/catalog'
 import { isSignedIn, schemaApi } from './services/katalaApi'
 
-import extinguisherIcon from './assets/icons/fire-extinguisher.png'
-import alarmIcon from './assets/icons/signal.png'
-import pumpIcon from './assets/icons/water-system.png'
-import generalFireIcon from './assets/icons/fire.png'
+import extinguisherImage from './assets/pictures/06a07516-5478-4ffa-8cc9-27c057371c58.jpg'
+import detectorImage from './assets/pictures/d46f04a1-bcd1-4ea9-80c4-a2c23f357a63.jpg'
+import pumpImage from './assets/pictures/download (1).jpg'
+import facilityImage from './assets/pictures/94423466-9af4-4ef6-a238-a24c98a65c1e.jpg'
 
 const CART_KEY = 'katala-cart-v3'
 const QUOTATION_REFS_KEY = 'katala-quotation-refs-v1'
@@ -19,14 +19,14 @@ const emptyCheckout = {
 }
 
 const imageByCategory = {
-  'Fire Extinguishers': extinguisherIcon,
-  'Cabinets & Fittings': generalFireIcon,
-  'Fire Alarm & Detection': alarmIcon,
-  'Fire Pumps': pumpIcon,
+  'Fire Extinguishers': extinguisherImage,
+  'Cabinets & Fittings': facilityImage,
+  'Fire Alarm & Detection': detectorImage,
+  'Fire Pumps': pumpImage,
 }
 
 function productImage(product) {
-  return imageByCategory[product.category] || generalFireIcon
+  return imageByCategory[product.category] || facilityImage
 }
 
 function loadJson(key, fallback) {

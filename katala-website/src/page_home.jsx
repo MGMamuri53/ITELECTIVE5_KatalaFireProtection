@@ -1,7 +1,7 @@
 import { Nav, Footer, InfoNote } from './components'
 import { company, serviceLines } from './data/company'
-import hero from './assets/icons/fire.png'
-import project from './assets/icons/signal.png'
+import hero from './assets/pictures/94423466-9af4-4ef6-a238-a24c98a65c1e.jpg'
+import project from './assets/pictures/8e738016-5df0-4c6b-b121-d8d3c90a4a67.jpg'
 
 export default function Home() {
   return (

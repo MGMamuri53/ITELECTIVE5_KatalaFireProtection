@@ -1,10 +1,10 @@
 import { useMemo, useState } from 'react'
 import { Nav, Footer, PageIntro, InfoNote } from './components'
 import { documentedProjects, listedProjects } from './data/company'
-import siayan from './assets/icons/signal.png'
-import puregold from './assets/icons/fire-extinguisher.png'
-import builders from './assets/icons/water-system.png'
-import batstate from './assets/icons/setting.png'
+import siayan from './assets/pictures/8baaccb3-b8f6-4890-8e85-034c34b7eca6.jpg'
+import puregold from './assets/pictures/94423466-9af4-4ef6-a238-a24c98a65c1e.jpg'
+import builders from './assets/pictures/download (1).jpg'
+import batstate from './assets/pictures/f112a358-799d-4b1f-be1f-d40d1e4e8c2c.jpg'
 
 const images = { 'siayan-alarm.jpg': siayan, 'puregold-maintenance.jpg': puregold, '721-pump.jpg': builders, 'batstate-pump.jpg': batstate }
 

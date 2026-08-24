@@ -1,7 +1,9 @@
 import { useState } from 'react';
 import Dashboard from './Dashboard';
 import ProductManagement from './Product_Management';
-import QuotationRequests from './Quotation_Request';
+import AccountManagement from './Account_Management';
+import ServiceManagement from './Service_Management';
+import WebsiteManagement from './Website_Management';
 
 function AdminPanel() {
   const [activeTab, setActiveTab] = useState('Dashboard');
@@ -10,10 +12,14 @@ function AdminPanel() {
     switch (activeTab) {
       case 'Dashboard':
         return <Dashboard onNavigate={setActiveTab} />;
-      case 'Products':
+      case 'Accounts':
+        return <AccountManagement onNavigate={setActiveTab} />;
+      case 'Website':
+        return <WebsiteManagement onNavigate={setActiveTab} />;
+      case 'Materials':
         return <ProductManagement onNavigate={setActiveTab} />;
-      case 'Requests':
-        return <QuotationRequests onNavigate={setActiveTab} />;
+      case 'Services':
+        return <ServiceManagement onNavigate={setActiveTab} />;
       default:
         return <Dashboard onNavigate={setActiveTab} />;
     }

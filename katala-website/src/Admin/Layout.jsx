@@ -1,15 +1,13 @@
 
-import { LayoutDashboard, Package, Wrench, ClipboardList, Calendar, Users, Settings, Search, Bell } from 'lucide-react';
+import { Globe2, LayoutDashboard, Package, Wrench, Users, UserCog, Search, Bell } from 'lucide-react';
 
 export const Sidebar = ({ activeTab, onNavigate }) => {
   const navItems = [
     { name: 'Dashboard', icon: LayoutDashboard },
-    { name: 'Products', icon: Package },
+    { name: 'Accounts', icon: UserCog },
+    { name: 'Website', icon: Globe2 },
+    { name: 'Materials', icon: Package },
     { name: 'Services', icon: Wrench },
-    { name: 'Requests', icon: ClipboardList },
-    { name: 'Appointments', icon: Calendar },
-    { name: 'Customers', icon: Users },
-    { name: 'Settings', icon: Settings },
   ];
 
   return (

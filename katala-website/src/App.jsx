@@ -6,6 +6,8 @@ import Services from './page_services'
 import Portfolio from './page_portfolio'
 import Company from './page_company_profile'
 import AdminPanel from './Admin/AdminPanel'
+import StaffPanel, { StaffCompleted, StaffMaintenance, StaffMessages, StaffServiceCalendar, StaffWorkQueue } from './Staff/StaffPanel'
+import Profile from './page_profile'
 import Signup from './page_signup'
 import Signin from './page_signin'
 import { getStoredSession } from './services/katalaApi'
@@ -16,13 +18,25 @@ const routes = {
   services: Services,
   portfolio: Portfolio,
   company: Company,
+  profile: Profile,
   admin: AdminPanel,
+  staff: StaffPanel,
+  'staff-work-queue': StaffWorkQueue,
+  'staff-messages': StaffMessages,
+  'staff-service-calendar': StaffServiceCalendar,
+  'staff-maintenance': StaffMaintenance,
+  'staff-completed': StaffCompleted,
   signup: Signup,
   signin: Signin,
 }
 
 function currentRoute() {
-  const route = location.hash.slice(1).trim().toLowerCase()
+  const route = location.hash
+    .slice(1)
+    .split('?')[0]
+    .replace(/^\/+/, '')
+    .trim()
+    .toLowerCase()
   return routes[route] ? route : 'signup'
 }
 
