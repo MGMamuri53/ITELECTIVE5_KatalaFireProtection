@@ -1,65 +1,173 @@
-import Layout from './Layout';
-import { ShieldCheck, UserPlus, Users, UserCog } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { CheckCircle2, RefreshCw, ShieldCheck, UserCog, Users } from 'lucide-react';
+import { schemaApi } from '../services/katalaApi';
 
-const accounts = [
-  { id: 'CUS-1042', name: 'Apex Industrial Park', email: 'facilities@apex.test', role: 'Customer', status: 'Verified' },
-  { id: 'CUS-1037', name: 'Summit Healthcare Facility', email: 'admin@summit.test', role: 'Customer', status: 'Pending' },
-  { id: 'STF-0021', name: 'Mara Santos', email: 'mara@katala.test', role: 'Staff', status: 'Active' },
-  { id: 'STF-0018', name: 'Luis Reyes', email: 'luis@katala.test', role: 'Staff', status: 'Active' },
+const roleOptions = [
+  { value: 'customer', label: 'Customer' },
+  { value: 'staff', label: 'Staff' },
+  { value: 'admin', label: 'Admin' },
 ];
 
-function AccountManagement({ onNavigate }) {
+const statusOptions = ['Active', 'Pending', 'Inactive', 'Suspended'];
+
+function AccountManagement() {
+  const [accounts, setAccounts] = useState([]);
+  const [summary, setSummary] = useState({ customers: 0, staff: 0, pending: 0 });
+  const [drafts, setDrafts] = useState({});
+  const [status, setStatus] = useState({ type: 'loading', message: 'Loading accounts...' });
+
+  useEffect(() => {
+    loadAccounts();
+  }, []);
+
+  async function loadAccounts() {
+    setStatus({ type: 'loading', message: 'Loading accounts...' });
+    try {
+      const data = await schemaApi.listAdminAccounts();
+      setAccounts(data.accounts || []);
+      setSummary(data.summary || { customers: 0, staff: 0, pending: 0 });
+      setDrafts(Object.fromEntries((data.accounts || []).map((account) => [
+        account.id,
+        { role: account.role, status: account.status },
+      ])));
+      setStatus({ type: 'idle', message: '' });
+    } catch (error) {
+      setStatus({ type: 'error', message: error.message || 'Unable to load accounts.' });
+    }
+  }
+
+  function updateDraft(accountId, field, value) {
+    setDrafts((current) => ({
+      ...current,
+      [accountId]: {
+        ...(current[accountId] || {}),
+        [field]: value,
+      },
+    }));
+  }
+
+  async function saveAccount(accountId, patch = null) {
+    const account = accounts.find((item) => item.id === accountId);
+    const draft = patch || drafts[accountId];
+    if (!account || !draft) return;
+
+    setStatus({ type: 'loading', message: 'Saving account...' });
+    try {
+      const data = await schemaApi.updateAdminAccount(accountId, draft);
+      setAccounts(data.accounts || []);
+      setSummary(data.summary || { customers: 0, staff: 0, pending: 0 });
+      setDrafts(Object.fromEntries((data.accounts || []).map((item) => [
+        item.id,
+        { role: item.role, status: item.status },
+      ])));
+      setStatus({ type: 'success', message: 'Account updated.' });
+    } catch (error) {
+      setStatus({ type: 'error', message: error.message || 'Unable to update account.' });
+    }
+  }
+
+  const pendingStaff = accounts.filter((account) => account.role === 'staff' && account.status === 'Pending');
+
   return (
-    <Layout activeTab="Accounts" title="Account Management" onNavigate={onNavigate}>
-      <div className="flex flex-col gap-6">
-        <div className="flex justify-between items-end">
-          <div>
-            <h1 className="text-2xl font-bold text-slate-900 mb-1">Accounts</h1>
-            <p className="text-slate-500">Admin controls customer access, staff accounts, roles, and verification status.</p>
+    <div className="flex flex-col gap-6">
+      <div className="flex justify-between items-end gap-4">
+        <div>
+          <h1 className="text-2xl font-bold text-slate-900 mb-1">Accounts</h1>
+          <p className="text-slate-500">Approve staff signups, assign roles, and control account status from Supabase-backed records.</p>
+        </div>
+        <button type="button" className="bg-white text-slate-700 px-4 py-2 rounded-lg font-bold flex items-center gap-2 border border-slate-200 hover:bg-slate-50 transition-colors" onClick={loadAccounts}>
+          <RefreshCw className="w-4 h-4" /> Refresh
+        </button>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+        <SummaryCard label="Customer accounts" value={summary.customers} icon={Users} />
+        <SummaryCard label="Staff accounts" value={summary.staff} icon={UserCog} />
+        <SummaryCard label="Pending approval" value={summary.pending} icon={ShieldCheck} />
+      </div>
+
+      {status.type !== 'idle' && (
+        <div className={`rounded-lg border px-4 py-3 text-sm font-semibold ${
+          status.type === 'error'
+            ? 'bg-red-50 text-red-700 border-red-100'
+            : status.type === 'success'
+              ? 'bg-emerald-50 text-emerald-700 border-emerald-100'
+              : 'bg-slate-50 text-slate-600 border-slate-200'
+        }`}>
+          {status.message}
+        </div>
+      )}
+
+      {pendingStaff.length > 0 && (
+        <section className="bg-white rounded-xl border border-slate-200 shadow-sm p-5">
+          <div className="flex items-center justify-between gap-4 mb-4">
+            <div>
+              <p className="text-[10px] font-bold text-[#b3000c] uppercase tracking-widest mb-1">Staff approval</p>
+              <h2 className="text-lg font-bold text-slate-900">Pending staff signups</h2>
+            </div>
+            <span className="text-xs font-bold text-amber-700 bg-amber-50 border border-amber-100 px-3 py-1 rounded-full">{pendingStaff.length} waiting</span>
           </div>
-          <button className="bg-[#b3000c] text-white px-4 py-2 rounded-lg font-bold flex items-center gap-2 hover:bg-[#8b000a] transition-colors">
-            <UserPlus className="w-4 h-4" /> Add account
-          </button>
-        </div>
+          <div className="grid gap-3">
+            {pendingStaff.map((account) => (
+              <article key={account.id} className="flex flex-col md:flex-row md:items-center justify-between gap-3 rounded-lg border border-slate-100 bg-slate-50 px-4 py-3">
+                <div>
+                  <strong className="block text-slate-900">{account.name}</strong>
+                  <span className="text-sm text-slate-500">{account.email}</span>
+                </div>
+                <button type="button" className="bg-[#b3000c] text-white px-4 py-2 rounded-lg font-bold flex items-center justify-center gap-2 hover:bg-[#8b000a] transition-colors" onClick={() => saveAccount(account.id, { role: 'staff', status: 'Active' })}>
+                  <CheckCircle2 className="w-4 h-4" /> Approve staff
+                </button>
+              </article>
+            ))}
+          </div>
+        </section>
+      )}
 
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-          <SummaryCard label="Customer accounts" value="128" icon={Users} />
-          <SummaryCard label="Staff accounts" value="12" icon={UserCog} />
-          <SummaryCard label="Pending verification" value="7" icon={ShieldCheck} />
-        </div>
-
-        <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
-          <table className="w-full text-left">
-            <thead className="bg-slate-50/50">
-              <tr>
-                <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Account ID</th>
-                <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Name</th>
-                <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Email</th>
-                <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Role</th>
-                <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Status</th>
-                <th className="px-6 py-4"></th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100">
-              {accounts.map((account) => (
+      <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+        <table className="w-full text-left">
+          <thead className="bg-slate-50/50">
+            <tr>
+              <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Account ID</th>
+              <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Name</th>
+              <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Email</th>
+              <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Role</th>
+              <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Status</th>
+              <th className="px-6 py-4"></th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-slate-100">
+            {accounts.map((account) => {
+              const draft = drafts[account.id] || { role: account.role, status: account.status };
+              return (
                 <tr key={account.id} className="hover:bg-slate-50/50 transition-colors">
-                  <td className="px-6 py-4 text-sm font-bold text-[#b3000c]">{account.id}</td>
+                  <td className="px-6 py-4 text-sm font-bold text-[#b3000c]">{account.accountId}</td>
                   <td className="px-6 py-4 text-sm font-medium text-slate-900">{account.name}</td>
                   <td className="px-6 py-4 text-sm text-slate-600">{account.email}</td>
-                  <td className="px-6 py-4 text-sm text-slate-600">{account.role}</td>
                   <td className="px-6 py-4">
-                    <span className={`text-[10px] font-bold px-2 py-1 rounded-full border ${account.status === 'Pending' ? 'bg-amber-50 text-amber-700 border-amber-100' : 'bg-emerald-50 text-emerald-700 border-emerald-100'}`}>
-                      {account.status}
-                    </span>
+                    <select className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700" value={draft.role} onChange={(event) => updateDraft(account.id, 'role', event.target.value)}>
+                      {roleOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                    </select>
                   </td>
-                  <td className="px-6 py-4 text-right"><button className="text-xs font-bold text-[#b3000c] hover:underline">MANAGE</button></td>
+                  <td className="px-6 py-4">
+                    <select className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700" value={draft.status} onChange={(event) => updateDraft(account.id, 'status', event.target.value)}>
+                      {statusOptions.map((option) => <option key={option} value={option}>{option}</option>)}
+                    </select>
+                  </td>
+                  <td className="px-6 py-4 text-right">
+                    <button type="button" className="text-xs font-bold text-[#b3000c] hover:underline" onClick={() => saveAccount(account.id)}>SAVE</button>
+                  </td>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+              );
+            })}
+            {!accounts.length && status.type !== 'loading' && (
+              <tr>
+                <td className="px-6 py-10 text-center text-sm text-slate-500" colSpan="6">No accounts found.</td>
+              </tr>
+            )}
+          </tbody>
+        </table>
       </div>
-    </Layout>
+    </div>
   );
 }
 

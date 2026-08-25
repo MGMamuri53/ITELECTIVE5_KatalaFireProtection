@@ -1,43 +1,82 @@
+import { useEffect, useState } from 'react';
+import { CheckCircle2, ClipboardList, Clock, RefreshCw } from 'lucide-react';
+import { schemaApi } from '../services/katalaApi';
 
-import Layout from './Layout';
-import { Plus, ClipboardList, Clock, CheckCircle2 } from 'lucide-react';
+function QuotationRequests() {
+  const [items, setItems] = useState([]);
+  const [selected, setSelected] = useState(null);
+  const [actionDraft, setActionDraft] = useState({ status: 'Submitted', additionalCost: '', validUntil: '', remarks: '' });
+  const [status, setStatus] = useState({ type: 'loading', message: 'Loading requests...' });
 
-function QuotationRequests({ onNavigate }) {
-  const requests = [
-    { id: 'REQ-8824', client: 'Apex Industrial Park', type: 'System Installation', date: 'Oct 24, 2023', status: 'Pending' },
-    { id: 'REQ-8823', client: 'Summit Healthcare Facility', type: 'Equipment Supply', date: 'Oct 23, 2023', status: 'Under Review' },
-    { id: 'REQ-8821', client: 'Nexus Tech Campus', type: 'Annual Inspection', date: 'Oct 21, 2023', status: 'Quoted' },
-  ];
+  useEffect(() => {
+    loadRequests();
+  }, []);
 
-  const getStatusStyle = (status) => {
-    switch (status) {
-      case 'Pending': return 'bg-amber-50 text-amber-700 border-amber-100';
-      case 'Under Review': return 'bg-blue-50 text-blue-700 border-blue-100';
-      case 'Quoted': return 'bg-emerald-50 text-emerald-700 border-emerald-100';
-      default: return 'bg-slate-50 text-slate-700 border-slate-100';
+  useEffect(() => {
+    if (!selected) return;
+    setActionDraft({
+      status: selected.status || 'Submitted',
+      additionalCost: '',
+      validUntil: '',
+      remarks: '',
+    });
+  }, [selected]);
+
+  async function loadRequests() {
+    setStatus({ type: 'loading', message: 'Loading requests...' });
+    try {
+      const data = await schemaApi.listStaffRequests();
+      const quotations = (data.items || []).filter((item) => item.kind === 'Quotation');
+      setItems(quotations);
+      setSelected((current) => current ? quotations.find((item) => item.id === current.id) || quotations[0] : quotations[0]);
+      setStatus({ type: 'idle', message: '' });
+    } catch (error) {
+      setStatus({ type: 'error', message: error.message || 'Unable to load requests.' });
     }
-  };
+  }
+
+  async function updateSelected() {
+    if (!selected) return;
+    setStatus({ type: 'loading', message: 'Updating quotation...' });
+    try {
+      await schemaApi.updateStaffQuotation(selected.id, actionDraft);
+      await loadRequests();
+      setStatus({ type: 'success', message: 'Quotation updated.' });
+    } catch (error) {
+      setStatus({ type: 'error', message: error.message || 'Unable to update quotation.' });
+    }
+  }
+
+  const pending = items.filter((item) => item.status === 'Submitted').length;
+  const review = items.filter((item) => /review/i.test(item.status || '')).length;
+  const quoted = items.filter((item) => /accepted|approved|payment|quoted/i.test(item.status || '')).length;
 
   return (
-    <Layout activeTab="Requests" title="Quotation Requests" onNavigate={onNavigate}>
+    <>
       <div className="flex justify-between items-end mb-8">
         <div>
           <h1 className="text-2xl font-bold text-slate-900 mb-1">Quotation Requests</h1>
-          <p className="text-slate-500">Manage and process incoming requests for fire protection systems.</p>
+          <p className="text-slate-500">Review customer quotation requests, set status, and prepare payment-ready quotations.</p>
         </div>
-        <button className="bg-[#b3000c] text-white px-4 py-2 rounded-lg font-bold flex items-center gap-2 hover:bg-[#8b000a] transition-colors">
-          <Plus className="w-4 h-4" /> New Request
+        <button type="button" onClick={loadRequests} className="bg-white border border-slate-200 text-slate-700 px-4 py-2 rounded-lg font-bold flex items-center gap-2 hover:bg-slate-50 transition-colors">
+          <RefreshCw className="w-4 h-4" /> Refresh
         </button>
       </div>
 
+      {status.type !== 'idle' && (
+        <div className={`mb-6 rounded-lg border px-4 py-3 text-sm ${status.type === 'error' ? 'bg-red-50 text-red-700 border-red-100' : status.type === 'success' ? 'bg-emerald-50 text-emerald-700 border-emerald-100' : 'bg-blue-50 text-blue-700 border-blue-100'}`}>
+          {status.message}
+        </div>
+      )}
+
       <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
         {[
-          { label: 'Total Requests', val: '142', icon: ClipboardList },
-          { label: 'Pending', val: '28', icon: Clock },
-          { label: 'Under Review', val: '15', icon: CheckCircle2 },
-          { label: 'Quoted Today', val: '7', icon: CheckCircle2 }
-        ].map((stat, i) => (
-          <div key={i} className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm">
+          { label: 'Total Requests', val: items.length, icon: ClipboardList },
+          { label: 'Pending', val: pending, icon: Clock },
+          { label: 'Under Review', val: review, icon: CheckCircle2 },
+          { label: 'Payment Ready', val: quoted, icon: CheckCircle2 },
+        ].map((stat) => (
+          <div key={stat.label} className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm">
             <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">{stat.label}</p>
             <div className="flex justify-between items-end">
               <h3 className="text-2xl font-bold text-slate-900">{stat.val}</h3>
@@ -47,38 +86,76 @@ function QuotationRequests({ onNavigate }) {
         ))}
       </div>
 
-      <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
-        <table className="w-full text-left">
-          <thead className="bg-slate-50/50">
-            <tr>
-              <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Reference No.</th>
-              <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Customer Name</th>
-              <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Request Type</th>
-              <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Date Submitted</th>
-              <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Status</th>
-              <th className="px-6 py-4"></th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-100">
-            {requests.map((r) => (
-              <tr key={r.id} className="hover:bg-slate-50/50 transition-colors cursor-pointer">
-                <td className="px-6 py-4 text-sm font-bold text-[#b3000c]">{r.id}</td>
-                <td className="px-6 py-4 text-sm font-medium text-slate-900">{r.client}</td>
-                <td className="px-6 py-4 text-sm text-slate-600">{r.type}</td>
-                <td className="px-6 py-4 text-sm text-slate-600">{r.date}</td>
-                <td className="px-6 py-4">
-                  <span className={`text-[10px] font-bold px-2 py-1 rounded-full border ${getStatusStyle(r.status)}`}>
-                    {r.status}
-                  </span>
-                </td>
-                <td className="px-6 py-4 text-right"><button className="text-xs font-bold text-[#b3000c] hover:underline">VIEW DETAILS</button></td>
+      <div className="grid grid-cols-1 xl:grid-cols-[1fr_380px] gap-6">
+        <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+          <table className="w-full text-left">
+            <thead className="bg-slate-50/50">
+              <tr>
+                <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Reference No.</th>
+                <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Customer Name</th>
+                <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Project</th>
+                <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Date Submitted</th>
+                <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Status</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {items.map((item) => (
+                <tr key={item.id} onClick={() => setSelected(item)} className={`hover:bg-slate-50/50 transition-colors cursor-pointer ${selected?.id === item.id ? 'bg-red-50/50' : ''}`}>
+                  <td className="px-6 py-4 text-sm font-bold text-[#b3000c]">{item.id}</td>
+                  <td className="px-6 py-4 text-sm font-medium text-slate-900">{item.customer}</td>
+                  <td className="px-6 py-4 text-sm text-slate-600">{item.subject}</td>
+                  <td className="px-6 py-4 text-sm text-slate-600">{item.submittedAt ? new Date(item.submittedAt).toLocaleDateString() : 'Not set'}</td>
+                  <td className="px-6 py-4"><StatusPill status={item.status} /></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        {selected && (
+          <aside className="bg-white rounded-xl border border-slate-200 shadow-sm p-6">
+            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Selected request</p>
+            <h2 className="text-lg font-bold text-slate-900">{selected.id}</h2>
+            <p className="text-sm text-slate-500 mb-5">{selected.customer} / {selected.email}</p>
+
+            <label className="block text-xs font-bold text-slate-500 uppercase mb-2">Status</label>
+            <select className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm mb-4" value={actionDraft.status} onChange={(event) => setActionDraft((current) => ({ ...current, status: event.target.value }))}>
+              <option>Submitted</option>
+              <option>Under Review</option>
+              <option>Accepted</option>
+              <option>Ready for Payment</option>
+              <option>Rejected</option>
+              <option>Cancelled</option>
+            </select>
+
+            <label className="block text-xs font-bold text-slate-500 uppercase mb-2">Additional cost</label>
+            <input className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm mb-4" type="number" min="0" step="0.01" placeholder="0.00" value={actionDraft.additionalCost} onChange={(event) => setActionDraft((current) => ({ ...current, additionalCost: event.target.value }))} />
+
+            <label className="block text-xs font-bold text-slate-500 uppercase mb-2">Valid until</label>
+            <input className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm mb-4" type="date" value={actionDraft.validUntil} onChange={(event) => setActionDraft((current) => ({ ...current, validUntil: event.target.value }))} />
+
+            <label className="block text-xs font-bold text-slate-500 uppercase mb-2">Staff remarks</label>
+            <textarea className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm mb-4 min-h-24" value={actionDraft.remarks} onChange={(event) => setActionDraft((current) => ({ ...current, remarks: event.target.value }))} />
+
+            <button type="button" className="w-full bg-[#b3000c] text-white px-4 py-2 rounded-lg font-bold hover:bg-[#8b000a] transition-colors" onClick={updateSelected}>
+              Save quotation update
+            </button>
+
+            <p className="text-sm text-slate-600">{selected.customerRemarks || 'No customer remarks.'}</p>
+          </aside>
+        )}
       </div>
-    </Layout>
+    </>
   );
+}
+
+function StatusPill({ status }) {
+  const style = /submitted|pending/i.test(status)
+    ? 'bg-amber-50 text-amber-700 border-amber-100'
+    : /review/i.test(status)
+      ? 'bg-blue-50 text-blue-700 border-blue-100'
+      : 'bg-emerald-50 text-emerald-700 border-emerald-100';
+  return <span className={`text-[10px] font-bold px-2 py-1 rounded-full border ${style}`}>{status}</span>;
 }
 
 export default QuotationRequests;

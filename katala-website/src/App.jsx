@@ -10,7 +10,10 @@ import StaffPanel, { StaffCompleted, StaffMaintenance, StaffMessages, StaffServi
 import Profile from './page_profile'
 import Signup from './page_signup'
 import Signin from './page_signin'
-import { getStoredSession } from './services/katalaApi'
+import { getStoredSession, isAuthReady } from './services/katalaApi'
+
+const staffRoutes = new Set(['staff', 'staff-work-queue', 'staff-messages', 'staff-service-calendar', 'staff-maintenance', 'staff-completed'])
+const protectedRoutes = new Set(['admin', 'profile', ...staffRoutes])
 
 const routes = {
   home: Home,
@@ -30,6 +33,12 @@ const routes = {
   signin: Signin,
 }
 
+function defaultRouteForRole(role) {
+  if (role === 'admin') return 'admin'
+  if (role === 'staff') return 'staff-work-queue'
+  return 'profile'
+}
+
 function currentRoute() {
   const route = location.hash
     .slice(1)
@@ -42,6 +51,7 @@ function currentRoute() {
 
 export default function App() {
   const [page, setPage] = useState(currentRoute)
+  const [authReady, setAuthReady] = useState(isAuthReady)
 
   useEffect(() => {
     if (!location.hash) history.replaceState(null, '', '#signup')
@@ -49,19 +59,35 @@ export default function App() {
     const syncRoute = () => {
       setPage(currentRoute())
       window.scrollTo(0, 0)
+      syncAuth()
     }
 
     const syncAuth = () => {
+      setAuthReady(isAuthReady())
       const session = getStoredSession()
       const route = currentRoute()
+      const role = session?.user?.role || 'customer'
+
+      if (!isAuthReady() && protectedRoutes.has(route)) return
 
       // Supabase's email-confirmation link can establish the verified session
       // when the customer returns to the site. Move verified customers out of
       // the registration/sign-in screen once that session is available.
       if (session?.token && (route === 'signup' || route === 'signin')) {
-        const returnPage = sessionStorage.getItem('katala-return-after-auth') || 'home'
+        if (route === 'signin' && sessionStorage.getItem('katala-login-in-progress')) return
+        const returnPage = sessionStorage.getItem('katala-return-after-auth') || defaultRouteForRole(role)
         sessionStorage.removeItem('katala-return-after-auth')
         location.hash = returnPage
+      }
+
+      if (route === 'admin' && (!session?.token || role !== 'admin')) {
+        sessionStorage.setItem('katala-return-after-auth', 'admin')
+        location.hash = 'signin'
+      }
+
+      if (staffRoutes.has(route) && (!session?.token || !['staff', 'admin'].includes(role))) {
+        sessionStorage.setItem('katala-return-after-auth', route)
+        location.hash = 'signin'
       }
     }
 
@@ -76,5 +102,8 @@ export default function App() {
   }, [])
 
   const Page = routes[page] || Signup
+  if (!authReady && protectedRoutes.has(page)) {
+    return <div className="auth-loading-screen">Loading secure portal...</div>
+  }
   return <Page />
 }

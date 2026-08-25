@@ -1,13 +1,17 @@
+import { useEffect, useRef, useState } from 'react';
 import {
   Bell,
   CalendarDays,
   CheckCircle2,
   ClipboardList,
+  LogOut,
   MessageSquare,
   Search,
   ShieldCheck,
+  User,
   UserRound,
 } from 'lucide-react';
+import { authApi, getStoredSession } from '../services/katalaApi';
 
 const navItems = [
   { name: 'Work Queue', route: 'staff-work-queue', icon: ClipboardList },
@@ -43,7 +47,7 @@ function StaffLayout({ activePage, children }) {
           ))}
         </nav>
 
-        <a href="#home" className="mx-4 px-4 py-3 text-sm font-medium text-slate-300 hover:text-white transition-colors">Back to website</a>
+        <SidebarAccount />
       </aside>
 
       <header className="h-16 bg-white border-b border-slate-200 flex items-center justify-between px-8 ml-[250px] sticky top-0 z-40">
@@ -55,13 +59,11 @@ function StaffLayout({ activePage, children }) {
           </div>
         </div>
         <div className="flex items-center gap-4">
-          <button className="p-2 text-slate-500 hover:bg-slate-50 rounded-full relative">
+          <button type="button" className="p-2 text-slate-500 hover:bg-slate-50 rounded-full relative">
             <Bell className="w-5 h-5" />
             <span className="absolute top-2 right-2 w-2 h-2 bg-[#b3000c] rounded-full border-2 border-white"></span>
           </button>
-          <div className="w-10 h-10 rounded-full bg-slate-200 flex items-center justify-center border border-slate-200">
-            <UserRound className="w-5 h-5 text-slate-500" />
-          </div>
+          <TopbarAccount />
         </div>
       </header>
 
@@ -80,3 +82,57 @@ const StaffNavItem = ({ active = false, href, icon: Icon, label }) => (
 );
 
 export default StaffLayout;
+
+function accountLabel() {
+  const user = getStoredSession()?.user;
+  return user?.name || user?.email || 'Staff User';
+}
+
+async function signOut() {
+  await authApi.signout().catch(() => {});
+  location.hash = 'signin';
+}
+
+function SidebarAccount() {
+  const label = accountLabel();
+
+  return (
+    <div className="px-4 mt-auto grid gap-2">
+      <a href="#home" className="px-4 py-2 text-sm font-medium text-slate-300 hover:text-white transition-colors">Back to website</a>
+      <button type="button" className="w-full flex items-center px-4 py-3 text-slate-300 hover:text-white transition-colors" onClick={signOut} title="Sign out">
+        <div className="w-8 h-8 rounded-full bg-slate-600 mr-3 flex items-center justify-center">
+          <UserRound className="w-4 h-4" />
+        </div>
+        <span className="text-sm font-medium truncate">{label}</span>
+        <LogOut className="w-4 h-4 ml-auto" />
+      </button>
+    </div>
+  );
+}
+
+function TopbarAccount() {
+  const [open, setOpen] = useState(false);
+  const menuRef = useRef(null);
+  const label = accountLabel();
+  const initial = label.charAt(0).toUpperCase();
+
+  useEffect(() => {
+    function close(event) {
+      if (menuRef.current && !menuRef.current.contains(event.target)) setOpen(false);
+    }
+    document.addEventListener('mousedown', close);
+    return () => document.removeEventListener('mousedown', close);
+  }, []);
+
+  return (
+    <div className="portal-account-menu" ref={menuRef}>
+      <button type="button" className="portal-avatar-button" onClick={() => setOpen((current) => !current)} aria-haspopup="menu" aria-expanded={open} title={label}>
+        {initial || <User className="w-5 h-5" />}
+      </button>
+      <div className={`portal-account-dropdown ${open ? 'open' : ''}`} role="menu">
+        <a href="#home" role="menuitem">Back to website</a>
+        <button type="button" role="menuitem" onClick={signOut}>Sign out</button>
+      </div>
+    </div>
+  );
+}

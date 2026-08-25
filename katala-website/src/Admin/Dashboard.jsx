@@ -1,6 +1,5 @@
 
 import { Globe2, Package, Wrench, Users, TrendingUp } from 'lucide-react';
-import Layout from './Layout';
 
 const MetricCard = ({ label, value, icon: Icon, colorClass, trend }) => (
   <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm hover:shadow-md transition-shadow">
@@ -19,9 +18,9 @@ const MetricCard = ({ label, value, icon: Icon, colorClass, trend }) => (
   </div>
 );
 
-function Dashboard({ onNavigate }) {
+function Dashboard() {
   return (
-    <Layout activeTab="Dashboard" title="Admin Portal" onNavigate={onNavigate}>
+    <>
       <div className="mb-8">
         <h1 className="text-2xl font-bold text-slate-900 mb-1">System Overview</h1>
         <p className="text-slate-500">High-level operational metrics and recent activity.</p>
@@ -33,7 +32,7 @@ function Dashboard({ onNavigate }) {
         <MetricCard label="Active Services" value="18" icon={Wrench} colorClass="text-slate-400" trend="1.8%" />
         <MetricCard label="Website Updates" value="6" icon={Globe2} colorClass="text-amber-500" />
       </div>
-    </Layout>
+    </>
   );
 }
 

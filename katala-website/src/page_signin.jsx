@@ -10,7 +10,7 @@ function initialEmail() {
 }
 
 export default function Signin() {
-  const [form, setForm] = useState(() => ({ email: initialEmail(), password: '' }))
+  const [form, setForm] = useState(() => ({ email: initialEmail(), password: '', portal: 'customer' }))
   const [status, setStatus] = useState({ type: 'idle', message: '' })
 
   function update(e) {
@@ -28,15 +28,24 @@ export default function Signin() {
       return
     }
 
-    setStatus({ type: 'loading', message: 'Signing you in…' })
+    setStatus({ type: 'loading', message: 'Signing you in...' })
+
+    sessionStorage.setItem('katala-login-in-progress', '1')
 
     try {
-      await authApi.signin({ email, password: form.password })
+      const data = await authApi.signin({ email, password: form.password, portal: form.portal })
       sessionStorage.removeItem('katala-signin-email')
-      const returnPage = sessionStorage.getItem('katala-return-after-auth') || 'home'
+      const defaultPage = data.user?.role === 'admin'
+        ? 'admin'
+        : data.user?.role === 'staff'
+          ? 'staff-work-queue'
+          : 'profile'
+      const returnPage = sessionStorage.getItem('katala-return-after-auth') || defaultPage
       sessionStorage.removeItem('katala-return-after-auth')
+      sessionStorage.removeItem('katala-login-in-progress')
       location.hash = returnPage
     } catch (error) {
+      sessionStorage.removeItem('katala-login-in-progress')
       const raw = String(error?.message || '')
       let message = raw || 'Unable to sign in.'
       if (/email not confirmed|not confirmed/i.test(raw)) {
@@ -68,20 +77,30 @@ export default function Signin() {
 
       <section className="auth-form-side">
         <div className="signup-box signin-box">
-          <a className="auth-home" href="#home">← Back to website</a>
+          <a className="auth-home" href="#home">Back to website</a>
           <div className="auth-step-label">CLIENT PORTAL</div>
           <h1>Welcome back</h1>
           <p className="auth-intro">Sign in with your verified email address to continue.</p>
           <div className="signin-divider" />
 
           <form onSubmit={submit}>
+            <label className="field">
+              <span>Sign in as</span>
+              <select name="portal" value={form.portal} onChange={update}>
+                <option value="customer">Customer</option>
+                <option value="staff">Staff</option>
+                <option value="admin">Administrator</option>
+              </select>
+            </label>
             <Field label="Email address" name="email" type="email" value={form.email} onChange={update} autoComplete="email" placeholder="name@company.com" required />
             <PasswordField label="Password" name="password" value={form.password} onChange={update} autoComplete="current-password" required />
 
-            {status.type !== 'idle' && <div className={`auth-status ${status.type}`} role="status">{status.message}</div>}
+            <div className="auth-status-slot">
+              {status.type !== 'idle' && <div className={`auth-status ${status.type}`} role="status">{status.message}</div>}
+            </div>
 
             <button className="continue" type="submit" disabled={status.type === 'loading'}>
-              {status.type === 'loading' ? 'Signing in…' : <>Sign in <span aria-hidden="true">→</span></>}
+              {status.type === 'loading' ? 'Signing in...' : 'Sign in'}
             </button>
           </form>
           <p className="signin-link">Need an account? <a href="#signup">Create one</a></p>

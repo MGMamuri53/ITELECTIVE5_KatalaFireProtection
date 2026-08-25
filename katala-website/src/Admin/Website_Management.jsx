@@ -1,4 +1,3 @@
-import Layout from './Layout';
 import { Globe2, Image, Megaphone, Save } from 'lucide-react';
 
 const websiteSections = [
@@ -8,9 +7,9 @@ const websiteSections = [
   { name: 'Contact information', status: 'Published', owner: 'Admin' },
 ];
 
-function WebsiteManagement({ onNavigate }) {
+function WebsiteManagement() {
   return (
-    <Layout activeTab="Website" title="Website Management" onNavigate={onNavigate}>
+    <>
       <div className="flex justify-between items-end mb-8">
         <div>
           <h1 className="text-2xl font-bold text-slate-900 mb-1">Website Content</h1>
@@ -56,7 +55,7 @@ function WebsiteManagement({ onNavigate }) {
           </div>
         </section>
       </div>
-    </Layout>
+    </>
   );
 }
 

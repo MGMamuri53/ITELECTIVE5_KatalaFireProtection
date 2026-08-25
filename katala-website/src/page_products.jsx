@@ -17,6 +17,7 @@ const emptyCheckout = {
   projectAddress: '',
   customerRemarks: '',
 }
+const temporaryUnitPrice = Number(import.meta.env.VITE_TEMP_QUOTATION_UNIT_PRICE || 0.99)
 
 const imageByCategory = {
   'Fire Extinguishers': extinguisherImage,
@@ -58,18 +59,80 @@ function dbSafeModel(model) {
   return model
 }
 
+const peso = new Intl.NumberFormat('en-PH', {
+  style: 'currency',
+  currency: 'PHP',
+})
+
+function formatPeso(value) {
+  return peso.format(Number(value || 0))
+}
+
+function normalizeKey(value) {
+  return String(value || '').trim().toLowerCase()
+}
+
+function stockLabel(product, materials) {
+  if (!materials.length) return 'Database stock: checking availability on submission'
+  const matches = materials.filter((material) => {
+    const sameName = normalizeKey(material.name) === normalizeKey(product.name)
+    const sameModel = !dbSafeModel(product.model) || normalizeKey(material.model) === normalizeKey(product.model)
+    return sameName && sameModel
+  })
+  if (!matches.length) return 'Database stock: manual confirmation required'
+  const knownStock = matches
+    .map((item) => item.stock)
+    .filter((value) => value !== null && value !== undefined)
+  if (!knownStock.length) return 'Database stock: available for quotation'
+  const total = knownStock.reduce((sum, value) => sum + Number(value || 0), 0)
+  return `${total} unit${total === 1 ? '' : 's'} available in database`
+}
+
 export default function Products() {
   const [query, setQuery] = useState('')
   const [category, setCategory] = useState('All')
+  const [dbMaterials, setDbMaterials] = useState([])
+  const [catalogStatus, setCatalogStatus] = useState('')
   const [selected, setSelected] = useState(null)
   const [cartOpen, setCartOpen] = useState(false)
   const [manageOpen, setManageOpen] = useState(false)
   const [cart, setCart] = useState(() => normalizeCart(loadJson(CART_KEY, [])))
   const [quotationRefs, setQuotationRefs] = useState(() => loadJson(QUOTATION_REFS_KEY, []))
   const [pendingAdd, setPendingAdd] = useState(null)
+  const [returnPaymentReference, setReturnPaymentReference] = useState('')
 
   useEffect(() => localStorage.setItem(CART_KEY, JSON.stringify(cart)), [cart])
   useEffect(() => localStorage.setItem(QUOTATION_REFS_KEY, JSON.stringify(quotationRefs)), [quotationRefs])
+
+  useEffect(() => {
+    let cancelled = false
+    schemaApi.listCatalogMaterials()
+      .then((data) => {
+        if (cancelled) return
+        setDbMaterials(data.materials || [])
+        setCatalogStatus('')
+      })
+      .catch(() => {
+        if (!cancelled) setCatalogStatus('Database stock is unavailable; quotation quantities will still be checked when submitted.')
+      })
+    return () => { cancelled = true }
+  }, [])
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    const paidReference = params.get('payment_reference')
+    const cancelledReference = params.get('payment_cancelled')
+    const paymentReference = paidReference || cancelledReference
+    if (!paymentReference) return
+
+    params.delete('payment_reference')
+    params.delete('payment_cancelled')
+    const nextUrl = `${window.location.pathname}${params.toString() ? `?${params}` : ''}${window.location.hash || '#products'}`
+    window.history.replaceState(null, '', nextUrl)
+
+    setReturnPaymentReference(paymentReference)
+    if (isSignedIn()) setManageOpen(true)
+  }, [])
 
   const products = useMemo(() => {
     const q = query.trim().toLowerCase()
@@ -166,6 +229,11 @@ export default function Products() {
                       <span className="catalog-category">{item.category}</span>
                       <h2>{item.name}</h2>
                       <p className="model-line">{item.model}</p>
+                      <div className="product-price">
+                        <span>Temporary test price</span>
+                        <strong>{formatPeso(temporaryUnitPrice)}</strong>
+                      </div>
+                      <p className="stock-line">{stockLabel(item, dbMaterials)}</p>
                       {item.variants.length > 0 && <p className="variant-preview">Shown options: {item.variants.join(', ')}</p>}
                       <div className="product-card-actions">
                         <button className="btn secondary full" type="button" onClick={() => setSelected(item)}>View specifications</button>
@@ -186,6 +254,7 @@ export default function Products() {
             <InfoNote title="Quotation cart">
               Add the products you want to review, adjust quantities in the cart, then submit one quotation request. Katala will confirm the final product configuration, pricing, and availability.
             </InfoNote>
+            {catalogStatus && <div className="form-status loading">{catalogStatus}</div>}
           </div>
         </section>
       </main>
@@ -206,6 +275,10 @@ export default function Products() {
           setCart={setCart}
           onClose={() => setCartOpen(false)}
           onQuotationCreated={saveQuotationReference}
+          onManageQuotation={() => {
+            setCartOpen(false)
+            setManageOpen(true)
+          }}
         />
       )}
 
@@ -213,6 +286,8 @@ export default function Products() {
         <ManageQuotationModal
           quotationRefs={quotationRefs}
           setQuotationRefs={setQuotationRefs}
+          initialPaymentReference={returnPaymentReference}
+          onInitialPaymentHandled={() => setReturnPaymentReference('')}
           onClose={() => setManageOpen(false)}
         />
       )}
@@ -264,7 +339,7 @@ function ProductModal({ product, image, onClose, onAdd }) {
               <div><span>Model / reference</span><strong>{product.model}</strong></div>
               <div><span>Product description</span><strong>{product.profileLabel}</strong></div>
               <div><span>Listed options</span><strong>{product.variants.length ? product.variants.join(', ') : 'Configuration to be confirmed'}</strong></div>
-              <div><span>Price</span><strong>Request quotation</strong></div>
+              <div><span>Price</span><strong>{formatPeso(temporaryUnitPrice)} temporary test price</strong></div>
               <div><span>Availability</span><strong>Confirm with Katala</strong></div>
             </div>
 
@@ -447,7 +522,7 @@ function AddToCartConfirmModal({ item, onChange, onCancel, onConfirm }) {
   )
 }
 
-function CartModal({ cart, setCart, onClose, onQuotationCreated }) {
+function CartModal({ cart, setCart, onClose, onQuotationCreated, onManageQuotation }) {
   const [showCheckout, setShowCheckout] = useState(false)
   const [form, setForm] = useState(emptyCheckout)
   const [status, setStatus] = useState({ type: 'idle', message: '', referenceNumber: '' })
@@ -469,6 +544,7 @@ function CartModal({ cart, setCart, onClose, onQuotationCreated }) {
     .map((line) => ({ ...line, product: catalog.find((item) => item.id === line.productId) }))
     .filter((line) => line.product)
   const totalUnits = lines.reduce((sum, line) => sum + line.quantity, 0)
+  const temporaryCartTotal = lines.reduce((sum, line) => sum + (Number(line.quantity || 0) * temporaryUnitPrice), 0)
 
   function updateLine(index, patch) {
     setCart((current) => current.map((line, lineIndex) => lineIndex === index ? { ...line, ...patch } : line))
@@ -521,7 +597,10 @@ function CartModal({ cart, setCart, onClose, onQuotationCreated }) {
         <div className="cart-panel">
           <div className="cart-heading">
             <div><span className="eyebrow">YOUR CART</span><h2 id="cart-title">Quotation request</h2></div>
-            <strong>{totalUnits} unit{totalUnits === 1 ? '' : 's'}</strong>
+            <div className="cart-heading-total">
+              <strong>{formatPeso(temporaryCartTotal)}</strong>
+              <span>{totalUnits} unit{totalUnits === 1 ? '' : 's'} at {formatPeso(temporaryUnitPrice)} each</span>
+            </div>
           </div>
 
           {lines.length > 0 ? (
@@ -532,6 +611,7 @@ function CartModal({ cart, setCart, onClose, onQuotationCreated }) {
                   <div className="cart-line-copy">
                     <strong>{line.product.name}</strong>
                     <span>{line.product.model}</span>
+                    <span>{formatPeso(temporaryUnitPrice)} each - {formatPeso(Number(line.quantity || 0) * temporaryUnitPrice)} line total</span>
                     {line.product.variants.length > 0 && (
                       <label>
                         Option
@@ -597,8 +677,11 @@ function CartModal({ cart, setCart, onClose, onQuotationCreated }) {
               <h3>Quotation request submitted</h3>
               <p>{status.message}</p>
               <p><strong>Reference: {status.referenceNumber}</strong></p>
-              <p className="muted">Keep this reference number for quotation follow-up.</p>
-              <button className="btn primary" type="button" onClick={onClose}>Done</button>
+              <p className="muted">PayMongo checkout appears in quotation management using the temporary PHP 0.99 test price.</p>
+              <div className="form-actions">
+                <button className="btn primary" type="button" onClick={onManageQuotation}>Manage quotation/payment</button>
+                <button className="btn secondary" type="button" onClick={onClose}>Done</button>
+              </div>
             </div>
           )}
         </div>
@@ -607,11 +690,13 @@ function CartModal({ cart, setCart, onClose, onQuotationCreated }) {
   )
 }
 
-function ManageQuotationModal({ quotationRefs, setQuotationRefs, onClose }) {
+function ManageQuotationModal({ quotationRefs, setQuotationRefs, initialPaymentReference = '', onInitialPaymentHandled, onClose }) {
   const [selectedReference, setSelectedReference] = useState(quotationRefs[0]?.referenceNumber || '')
   const [quotation, setQuotation] = useState(null)
   const [form, setForm] = useState(emptyCheckout)
   const [status, setStatus] = useState({ type: 'idle', message: '' })
+  const [checkoutStatus, setCheckoutStatus] = useState({ type: 'idle', message: '' })
+  const [receipt, setReceipt] = useState(null)
   const closeRef = useRef(null)
 
   useEffect(() => {
@@ -630,6 +715,7 @@ function ManageQuotationModal({ quotationRefs, setQuotationRefs, onClose }) {
     if (!selectedReference) return
     let cancelled = false
     setQuotation(null)
+    setCheckoutStatus({ type: 'idle', message: '' })
     setStatus({ type: 'loading', message: 'Loading quotation…' })
 
     schemaApi.getQuotation(selectedReference)
@@ -650,6 +736,31 @@ function ManageQuotationModal({ quotationRefs, setQuotationRefs, onClose }) {
 
     return () => { cancelled = true }
   }, [selectedReference])
+
+  useEffect(() => {
+    if (!initialPaymentReference) return
+    let cancelled = false
+    setCheckoutStatus({ type: 'loading', message: 'Confirming payment status...' })
+
+    schemaApi.getPaymentReceipt(initialPaymentReference)
+      .then((data) => {
+        if (cancelled) return
+        setReceipt(data.receipt)
+        setCheckoutStatus({
+          type: data.receipt?.payment?.status === 'Paid' ? 'success' : 'loading',
+          message: data.receipt?.payment?.status === 'Paid'
+            ? 'Payment confirmed. Receipt is ready.'
+            : 'Payment is still pending. Please refresh again in a moment.',
+        })
+        if (data.receipt?.quotationReference) setSelectedReference(data.receipt.quotationReference)
+      })
+      .catch((error) => !cancelled && setCheckoutStatus({ type: 'error', message: error.message || 'Unable to confirm payment.' }))
+      .finally(() => {
+        if (!cancelled) onInitialPaymentHandled?.()
+      })
+
+    return () => { cancelled = true }
+  }, [initialPaymentReference, onInitialPaymentHandled])
 
   function update(e) {
     setForm((current) => ({ ...current, [e.target.name]: e.target.value }))
@@ -686,6 +797,47 @@ function ManageQuotationModal({ quotationRefs, setQuotationRefs, onClose }) {
   }
 
   const editable = quotation?.status === 'Submitted'
+  const paid = quotation?.payment?.status === 'Paid'
+  const pricedAndAccepted = quotation?.canPay
+  const paymentReady = pricedAndAccepted && quotation?.paymongoConfigured && !paid
+  const paymentMessage = paid
+    ? `Paid${quotation.payment?.paidAt ? ` on ${new Date(quotation.payment.paidAt).toLocaleString()}` : ''}.`
+    : !quotation?.paymongoConfigured
+      ? 'PayMongo is not configured on the server yet. Add PAYMONGO_SECRET_KEY to katala-website/.env and restart the app.'
+      : pricedAndAccepted
+        ? 'This quotation is ready for secure PayMongo checkout using the temporary PHP 0.99 test price.'
+        : 'Payment becomes available after the quotation has a test or reviewed price.'
+
+  async function payQuotation() {
+    if (!selectedReference || checkoutStatus.type === 'loading') return
+    setCheckoutStatus({ type: 'loading', message: 'Creating PayMongo checkout...' })
+
+    try {
+      const data = await schemaApi.createPaymongoCheckout(selectedReference)
+      if (!data.checkoutUrl) throw new Error('PayMongo did not return a checkout URL.')
+      window.location.href = data.checkoutUrl
+    } catch (error) {
+      setCheckoutStatus({ type: 'error', message: error.message || 'Unable to create payment checkout.' })
+    }
+  }
+
+  async function openReceipt(paymentReference = quotation?.payment?.referenceNumber) {
+    if (!paymentReference || checkoutStatus.type === 'loading') return
+    setCheckoutStatus({ type: 'loading', message: 'Loading receipt...' })
+
+    try {
+      const data = await schemaApi.getPaymentReceipt(paymentReference)
+      setReceipt(data.receipt)
+      setCheckoutStatus({
+        type: data.receipt?.payment?.status === 'Paid' ? 'success' : 'loading',
+        message: data.receipt?.payment?.status === 'Paid'
+          ? 'Receipt loaded.'
+          : 'Payment is still pending. Please check again after PayMongo confirms the payment.',
+      })
+    } catch (error) {
+      setCheckoutStatus({ type: 'error', message: error.message || 'Unable to load receipt.' })
+    }
+  }
 
   return (
     <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
@@ -710,6 +862,9 @@ function ManageQuotationModal({ quotationRefs, setQuotationRefs, onClose }) {
               <div className="managed-order-summary">
                 <div><span>Reference</span><strong>{quotation.referenceNumber}</strong></div>
                 <div><span>Status</span><strong>{quotation.status}</strong></div>
+                <div><span>Subtotal</span><strong>{formatPeso(quotation.subtotal)}</strong></div>
+                <div><span>Additional cost</span><strong>{formatPeso(quotation.additionalCost)}</strong></div>
+                <div><span>Total</span><strong>{formatPeso(quotation.totalAmount)}</strong></div>
                 <div><span>Submitted</span><strong>{quotation.submittedAt ? new Date(quotation.submittedAt).toLocaleString() : '—'}</strong></div>
               </div>
 
@@ -721,6 +876,41 @@ function ManageQuotationModal({ quotationRefs, setQuotationRefs, onClose }) {
                   </div>
                 ))}
               </div>
+
+              <div className="managed-price-lines">
+                {quotation.items?.map((item, index) => (
+                  <div key={`${item.productCode || item.productName}-price-${index}`}>
+                    <span>{item.productName} x {item.quantity}</span>
+                    <strong>
+                      {item.unitPrice !== null && item.unitPrice !== undefined
+                        ? `${formatPeso(item.unitPrice)} each = ${formatPeso(item.lineTotal)}`
+                        : 'No unit price'}
+                    </strong>
+                  </div>
+                ))}
+              </div>
+
+              <div className="payment-panel">
+                <div>
+                  <span className="eyebrow">PAYMENT</span>
+                  <h3>PayMongo transaction</h3>
+                  <p className="muted">{paymentMessage}</p>
+                </div>
+                <div className="payment-actions">
+                  <strong>{formatPeso(quotation.totalAmount)}</strong>
+                  {paid ? (
+                    <button className="btn primary" type="button" onClick={() => openReceipt()}>
+                      View receipt
+                    </button>
+                  ) : (
+                    <button className="btn primary" type="button" disabled={!paymentReady || checkoutStatus.type === 'loading'} onClick={payQuotation}>
+                      {checkoutStatus.type === 'loading' ? 'Preparing...' : 'Pay with PayMongo'}
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {checkoutStatus.type !== 'idle' && <div className={`form-status ${checkoutStatus.type}`}>{checkoutStatus.message}</div>}
 
               <form className="order-form manage-form" onSubmit={save}>
                 <div className="form-grid">
@@ -748,6 +938,74 @@ function ManageQuotationModal({ quotationRefs, setQuotationRefs, onClose }) {
             </div>
           )}
           {status.type === 'loading' && !quotation && <div className="form-status loading">{status.message}</div>}
+        </div>
+      </section>
+      {receipt && <ReceiptModal receipt={receipt} onClose={() => setReceipt(null)} />}
+    </div>
+  )
+}
+
+function ReceiptModal({ receipt, onClose }) {
+  const closeRef = useRef(null)
+
+  useEffect(() => {
+    closeRef.current?.focus()
+    const listener = (e) => e.key === 'Escape' && onClose()
+    window.addEventListener('keydown', listener)
+    return () => window.removeEventListener('keydown', listener)
+  }, [onClose])
+
+  return (
+    <div className="modal-backdrop receipt-backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+      <section className="product-modal receipt-modal" role="dialog" aria-modal="true" aria-labelledby="receipt-title">
+        <button ref={closeRef} className="modal-close" type="button" onClick={onClose} aria-label="Close">Ã—</button>
+        <div className="receipt-panel">
+          <div className="receipt-heading">
+            <div>
+              <span className="eyebrow">OFFICIAL RECEIPT</span>
+              <h2 id="receipt-title">{receipt.receiptNumber || 'Receipt pending'}</h2>
+              <p className="muted">Quotation {receipt.quotationReference}</p>
+            </div>
+            <strong>{formatPeso(receipt.totalAmount)}</strong>
+          </div>
+
+          <div className="receipt-meta">
+            <div><span>Customer</span><strong>{receipt.customerName || 'Customer'}</strong></div>
+            <div><span>Email</span><strong>{receipt.customerEmail || 'Not provided'}</strong></div>
+            <div><span>Paid at</span><strong>{receipt.paidAt ? new Date(receipt.paidAt).toLocaleString() : 'Pending'}</strong></div>
+            <div><span>Method</span><strong>{receipt.paymentMethod || 'PayMongo'}</strong></div>
+          </div>
+
+          <div className="receipt-lines">
+            {receipt.items?.map((item, index) => (
+              <div key={`${item.productCode || item.productName}-${index}`}>
+                <div>
+                  <strong>{item.productName}</strong>
+                  <span>{item.productSize || item.productModel || item.productCode || 'Item'} - Qty {item.quantity}</span>
+                </div>
+                <span>{formatPeso(item.lineTotal)}</span>
+              </div>
+            ))}
+            {Number(receipt.additionalCost || 0) > 0 && (
+              <div>
+                <div>
+                  <strong>Additional project cost</strong>
+                  <span>Reviewed quotation adjustment</span>
+                </div>
+                <span>{formatPeso(receipt.additionalCost)}</span>
+              </div>
+            )}
+          </div>
+
+          <div className="receipt-total">
+            <span>Total paid</span>
+            <strong>{formatPeso(receipt.totalAmount)}</strong>
+          </div>
+
+          <div className="form-actions">
+            <button className="btn primary" type="button" onClick={() => window.print()}>Print receipt</button>
+            <button className="btn secondary" type="button" onClick={onClose}>Close</button>
+          </div>
         </div>
       </section>
     </div>

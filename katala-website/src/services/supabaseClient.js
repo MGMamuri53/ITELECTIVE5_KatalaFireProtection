@@ -7,10 +7,7 @@ if (!supabaseUrl || !supabasePublishableKey) {
   console.warn('Supabase Auth is not configured. Set VITE_SUPABASE_URL and VITE_SUPABASE_PUBLISHABLE_KEY.')
 }
 
-// Security policy for the Katala client portal:
-// - Authentication is kept only in memory for the current page instance.
-// - Reloading/reopening the app requires the customer to sign in again.
-// - Remove auth data left behind by older versions that persisted tokens.
+
 function clearLegacyPersistedAuth() {
   try {
     localStorage.removeItem('katala-auth-v1')
@@ -21,7 +18,7 @@ function clearLegacyPersistedAuth() {
       localStorage.removeItem(`sb-${projectRef}-auth-token`)
     }
   } catch {
-    // Storage can be unavailable in privacy-restricted browser contexts.
+
   }
 }
 

@@ -12,6 +12,7 @@ const initialForm = {
   contactNumber: '',
   password: '',
   confirmPassword: '',
+  accountType: 'customer',
   companyName: '',
   jobTitle: '',
   industry: '',
@@ -75,9 +76,10 @@ export default function Signup() {
       return
     }
 
-    setStatus({ type: 'loading', message: 'Creating your account…' })
+    setStatus({ type: 'loading', message: 'Creating your account...' })
     try {
       const result = await authApi.signup({
+        accountType: form.accountType,
         firstName: form.firstName.trim(),
         lastName: form.lastName.trim(),
         email: form.email.trim().toLowerCase(),
@@ -95,11 +97,18 @@ export default function Signup() {
         setVerificationSent(true)
         setStatus({
           type: 'success',
-          message: `We sent a verification link to ${form.email.trim()}. Verify your email before signing in.`,
+          message: result.requiresApproval
+            ? `We sent a verification link to ${form.email.trim()}. After verification, wait for an administrator to approve staff access.`
+            : `We sent a verification link to ${form.email.trim()}. Verify your email before signing in.`,
         })
       } else {
-        setStatus({ type: 'success', message: 'Your account is ready.' })
-        location.hash = 'home'
+        if (result.requiresApproval) {
+          setVerificationSent(true)
+          setStatus({ type: 'success', message: 'Your staff account was submitted for administrator approval.' })
+        } else {
+          setStatus({ type: 'success', message: 'Your account is ready.' })
+          location.hash = 'home'
+        }
       }
     } catch (error) {
       const raw = String(error?.message || '')
@@ -112,7 +121,7 @@ export default function Signup() {
 
   async function resendVerification() {
     if (status.type === 'loading') return
-    setStatus({ type: 'loading', message: 'Sending another verification email…' })
+    setStatus({ type: 'loading', message: 'Sending another verification email...' })
     try {
       await authApi.resendVerification(form.email.trim().toLowerCase())
       setStatus({ type: 'success', message: `A new verification email was sent to ${form.email.trim()}.` })
@@ -145,7 +154,11 @@ export default function Signup() {
             <>
               <div className="auth-step-label">EMAIL VERIFICATION</div>
               <h1>Check your email</h1>
-              <p className="auth-intro">Your account has been created. Open the verification email from Katala and confirm your address before using the client portal.</p>
+              <p className="auth-intro">
+                {form.accountType === 'staff'
+                  ? 'Your staff account request has been received. Verify your email, then wait for an administrator to approve staff portal access.'
+                  : 'Your account has been created. Open the verification email from Katala and confirm your address before using the client portal.'}
+              </p>
               <div className="signin-divider" />
               <div className="privacy">
                 <img src={shield} alt="" />
@@ -174,6 +187,14 @@ export default function Signup() {
                       <Field label="Last name" name="lastName" value={form.lastName} onChange={update} autoComplete="family-name" required />
                     </div>
                     <Field label="Email address" name="email" type="email" value={form.email} onChange={update} autoComplete="email" placeholder="name@company.com" required />
+                    <label className="field">
+                      <span>Account type</span>
+                      <select name="accountType" value={form.accountType} onChange={update}>
+                        <option value="customer">Customer</option>
+                        <option value="staff">Staff</option>
+                      </select>
+                    </label>
+                    <p className="password-hint">Administrator accounts cannot be created from public signup. Admins can promote accounts after sign up.</p>
                     <Field
                       label="Mobile number"
                       name="contactNumber"
@@ -216,7 +237,7 @@ export default function Signup() {
                 <div className="auth-actions">
                   {step === 2 && <button className="back-button" type="button" onClick={() => { setStep(1); setStatus({ type: 'idle', message: '' }) }}>Back</button>}
                   <button className="continue" type="submit" disabled={status.type === 'loading'}>
-                    {status.type === 'loading' ? 'Creating account…' : step === 1 ? 'Continue' : 'Create account'}
+                    {status.type === 'loading' ? 'Creating account...' : step === 1 ? 'Continue' : 'Create account'}
                     {status.type !== 'loading' && <span aria-hidden="true">→</span>}
                   </button>
                 </div>

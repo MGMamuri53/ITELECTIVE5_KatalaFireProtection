@@ -66,6 +66,7 @@ function AccountMenu({ className = '', session, onSignOut, onNavigate }) {
   const [open, setOpen] = useState(false)
   const menuRef = useRef(null)
   const accountName = session.user?.name || session.user?.email || 'Account'
+  const role = session.user?.role || 'customer'
 
   useEffect(() => {
     function closeFromOutside(event) {
@@ -102,8 +103,8 @@ function AccountMenu({ className = '', session, onSignOut, onNavigate }) {
       </button>
       <div className={`account-dropdown ${open ? 'open' : ''}`} role="menu">
         <a href="#profile" role="menuitem" onClick={navigate}>Profile</a>
-        <a href="#admin" role="menuitem" onClick={navigate}>Admin page</a>
-        <a href="#staff-work-queue" role="menuitem" onClick={navigate}>Staff portal</a>
+        {role === 'admin' && <a href="#admin" role="menuitem" onClick={navigate}>Admin page</a>}
+        {(role === 'staff' || role === 'admin') && <a href="#staff-work-queue" role="menuitem" onClick={navigate}>Staff portal</a>}
         <button type="button" role="menuitem" onClick={signOut}>Sign out</button>
       </div>
     </div>

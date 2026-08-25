@@ -1,13 +1,17 @@
 
-import { Globe2, LayoutDashboard, Package, Wrench, Users, UserCog, Search, Bell } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import { Bell, ClipboardList, Globe2, LayoutDashboard, LogOut, Package, Search, Settings, User, Users, UserCog, Wrench } from 'lucide-react';
+import { authApi, getStoredSession } from '../services/katalaApi';
 
 export const Sidebar = ({ activeTab, onNavigate }) => {
   const navItems = [
     { name: 'Dashboard', icon: LayoutDashboard },
     { name: 'Accounts', icon: UserCog },
+    { name: 'Requests', icon: ClipboardList },
     { name: 'Website', icon: Globe2 },
     { name: 'Materials', icon: Package },
     { name: 'Services', icon: Wrench },
+    { name: 'Settings', icon: Settings },
   ];
 
   return (
@@ -25,8 +29,12 @@ export const Sidebar = ({ activeTab, onNavigate }) => {
       <nav className="flex-1 px-2 space-y-1">
         {navItems.map((item) => (
           <button
+            type="button"
             key={item.name}
-            onClick={() => onNavigate(item.name)}
+            onClick={() => {
+              if (activeTab !== item.name) onNavigate(item.name)
+            }}
+            aria-current={activeTab === item.name ? 'page' : undefined}
             className={`w-full flex items-center px-4 py-3 rounded-lg transition-colors ${
               activeTab === item.name 
                 ? 'bg-[#b3000c] text-white' 
@@ -39,14 +47,7 @@ export const Sidebar = ({ activeTab, onNavigate }) => {
         ))}
       </nav>
 
-      <div className="px-4 mt-auto">
-        <button className="w-full flex items-center px-4 py-3 text-slate-300 hover:text-white transition-colors">
-          <div className="w-8 h-8 rounded-full bg-slate-600 mr-3 flex items-center justify-center">
-            <Users className="w-4 h-4" />
-          </div>
-          <span className="text-sm font-medium">Admin User</span>
-        </button>
-      </div>
+      <SidebarAccount />
     </div>
   );
 };
@@ -65,18 +66,21 @@ export const TopBar = ({ title }) => (
       </div>
     </div>
     <div className="flex items-center gap-4">
-      <button className="p-2 text-slate-500 hover:bg-slate-50 rounded-full relative">
+      <button type="button" className="p-2 text-slate-500 hover:bg-slate-50 rounded-full relative">
         <Bell className="w-5 h-5" />
         <span className="absolute top-2 right-2 w-2 h-2 bg-[#b3000c] rounded-full border-2 border-white"></span>
       </button>
-      <div className="w-10 h-10 rounded-full bg-slate-200 overflow-hidden border border-slate-200">
-        <img src="https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&q=80&w=150" alt="User" />
-      </div>
+      <TopbarAccount />
     </div>
   </header>
 );
 
 function Layout({ children, activeTab, title, onNavigate }) {
+  useEffect(() => {
+    const theme = localStorage.getItem('katala-admin-theme') || 'light'
+    document.documentElement.classList.toggle('admin-theme-dark', theme === 'dark')
+  }, [])
+
   return (
     <div className="min-h-screen bg-[#f8fafc] font-sans text-slate-900">
       <Sidebar activeTab={activeTab} onNavigate={onNavigate} />
@@ -91,3 +95,56 @@ function Layout({ children, activeTab, title, onNavigate }) {
 }
 
 export default Layout;
+
+function accountLabel() {
+  const user = getStoredSession()?.user
+  return user?.name || user?.email || 'Admin User'
+}
+
+async function signOut() {
+  await authApi.signout().catch(() => {})
+  location.hash = 'signin'
+}
+
+function SidebarAccount() {
+  const label = accountLabel()
+
+  return (
+    <div className="px-4 mt-auto">
+      <button type="button" className="w-full flex items-center px-4 py-3 text-slate-300 hover:text-white transition-colors" onClick={signOut} title="Sign out">
+        <div className="w-8 h-8 rounded-full bg-slate-600 mr-3 flex items-center justify-center">
+          <Users className="w-4 h-4" />
+        </div>
+        <span className="text-sm font-medium truncate">{label}</span>
+        <LogOut className="w-4 h-4 ml-auto" />
+      </button>
+    </div>
+  )
+}
+
+function TopbarAccount() {
+  const [open, setOpen] = useState(false)
+  const menuRef = useRef(null)
+  const label = accountLabel()
+  const initial = label.charAt(0).toUpperCase()
+
+  useEffect(() => {
+    function close(event) {
+      if (menuRef.current && !menuRef.current.contains(event.target)) setOpen(false)
+    }
+    document.addEventListener('mousedown', close)
+    return () => document.removeEventListener('mousedown', close)
+  }, [])
+
+  return (
+    <div className="portal-account-menu" ref={menuRef}>
+      <button type="button" className="portal-avatar-button" onClick={() => setOpen((current) => !current)} aria-haspopup="menu" aria-expanded={open} title={label}>
+        {initial || <User className="w-5 h-5" />}
+      </button>
+      <div className={`portal-account-dropdown ${open ? 'open' : ''}`} role="menu">
+        <a href="#home" role="menuitem">Back to website</a>
+        <button type="button" role="menuitem" onClick={signOut}>Sign out</button>
+      </div>
+    </div>
+  )
+}
