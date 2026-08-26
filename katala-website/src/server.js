@@ -18,8 +18,6 @@ const paymongoMethods = (process.env.PAYMONGO_PAYMENT_METHODS || 'card,gcash,qrp
   .map((method) => method.trim())
   .filter(Boolean)
 const paymongoPassOnFees = String(process.env.PAYMONGO_PASS_ON_FEES || '').toLowerCase() === 'true'
-const temporaryQuotationUnitPrice = Number(process.env.TEMP_QUOTATION_UNIT_PRICE || '0.99')
-const allowSubmittedQuotationPayments = String(process.env.ALLOW_SUBMITTED_QUOTATION_PAYMENTS || 'true').toLowerCase() === 'true'
 
 const pool = databaseUrl
   ? new Pool({
@@ -834,6 +832,8 @@ function serviceRequestFields(body) {
 
   const userAddressId = nullable(body.userAddressId, 80)
   if (userAddressId && !isUuid(userAddressId)) return { error: 'Invalid saved address.' }
+  const recurrenceFrequency = normalizeRecurrenceFrequency(body.recurrenceFrequency)
+  const customerRemarks = nullable(body.customerRemarks, 2000)
 
   return {
     values: {
@@ -846,10 +846,38 @@ function serviceRequestFields(body) {
       projectAddress: nullable(body.projectAddress, 1000),
       preferredDate,
       preferredTime,
+      recurrenceFrequency,
       priorityLevel: priority,
-      customerRemarks: nullable(body.customerRemarks, 2000),
+      customerRemarks: customerRemarksWithRecurrence(customerRemarks, recurrenceFrequency),
     },
   }
+}
+
+function normalizeRecurrenceFrequency(value) {
+  const normalized = String(value || 'One-time').trim().toLowerCase()
+  if (normalized === 'weekly') return 'Weekly'
+  if (normalized === 'monthly') return 'Monthly'
+  if (normalized === 'quarterly') return 'Quarterly'
+  if (normalized === 'half-year' || normalized === 'half year' || normalized === 'semiannual' || normalized === 'semi-annual') return 'Half-year'
+  if (normalized === 'yearly' || normalized === 'annual' || normalized === 'annually') return 'Yearly'
+  return 'One-time'
+}
+
+function customerRemarksWithRecurrence(remarks, recurrenceFrequency) {
+  const cleanRemarks = stripRecurrenceFromRemarks(remarks)
+  const line = `Recurrence: ${recurrenceFrequency}`
+  return [line, cleanRemarks].filter(Boolean).join('\n')
+}
+
+function recurrenceFromRemarks(remarks) {
+  const match = String(remarks || '').match(/^Recurrence:\s*(.+)$/im)
+  return normalizeRecurrenceFrequency(match?.[1])
+}
+
+function stripRecurrenceFromRemarks(remarks) {
+  return String(remarks || '')
+    .replace(/^Recurrence:\s*.+$/im, '')
+    .trim() || null
 }
 
 function validateQuotationItems(body) {
@@ -987,7 +1015,7 @@ function toCentavos(value) {
 
 function quotationUnitPrice(value) {
   if (value !== null && value !== undefined) return toMoneyNumber(value)
-  return temporaryQuotationUnitPrice > 0 ? toMoneyNumber(temporaryQuotationUnitPrice) : null
+  return null
 }
 
 function paymentStatusDto(row) {
@@ -1024,7 +1052,6 @@ function quotationDto(row, items = [], payment = null) {
   const totals = quotationTotals(row, items)
   const quotationStatus = String(row.v_quotationstatus || '').toLowerCase()
   const payableStatuses = ['accepted', 'approved', 'ready for payment', 'for payment']
-  if (allowSubmittedQuotationPayments) payableStatuses.push('submitted')
 
   return {
     referenceNumber: row.v_referencenumber,
@@ -1087,14 +1114,14 @@ async function handleCreateQuotation(req, res, userId) {
         `INSERT INTO public.tbl_quotationproductitem
           (v_quotationid, v_productvariantid, v_quantity, v_itemdescription, v_unitprice)
          VALUES ($1, $2, $3, $4, $5)`,
-        [quotationId, item.variant.v_productvariantid, item.quantity, item.itemDescription, temporaryQuotationUnitPrice],
+        [quotationId, item.variant.v_productvariantid, item.quantity, item.itemDescription, null],
       )
     }
 
     await client.query(
       `INSERT INTO public.tbl_quotationstatushistory
         (v_quotationid, v_updatedbyuserid, v_status, v_statusremarks)
-       VALUES ($1, $2, 'Submitted', 'Submitted by customer')`,
+       VALUES ($1, $2, 'Submitted', 'Submitted by customer for staff review')`,
       [quotationId, userId],
     )
 
@@ -1105,7 +1132,7 @@ async function handleCreateQuotation(req, res, userId) {
     ok: true,
     referenceNumber: result.v_referencenumber,
     status: result.v_quotationstatus,
-    message: `Quotation request submitted with temporary test pricing at PHP ${temporaryQuotationUnitPrice.toFixed(2)} per item.`,
+    message: 'Quotation request submitted for staff review. Final charges will be set by Katala staff.',
   })
 }
 
@@ -1710,8 +1737,9 @@ function serviceRequestDto(row, serviceName) {
     projectAddress: row.v_projectaddress,
     preferredDate: row.v_preferreddate,
     preferredTime: row.v_preferredtime,
+    recurrenceFrequency: recurrenceFromRemarks(row.v_customerremarks),
     priorityLevel: row.v_prioritylevel,
-    customerRemarks: row.v_customerremarks,
+    customerRemarks: stripRecurrenceFromRemarks(row.v_customerremarks),
     status: row.v_requeststatus,
     submittedAt: row.v_submittedat,
     updatedAt: row.v_updatedat,
@@ -1871,6 +1899,46 @@ async function staffQuotationRows() {
   return result.rows
 }
 
+async function staffQuotationItemMap(quotationIds) {
+  if (!quotationIds.length) return new Map()
+  const variantColumns = await tableColumns('tbl_productvariant')
+  const stockColumn = firstColumn(variantColumns, ['v_stockquantity', 'v_stockqty', 'v_quantityonhand', 'v_quantity'])
+  const result = await pool.query(
+    `SELECT qpi.v_quotationid, qpi.v_quantity, qpi.v_unitprice, qpi.v_itemdescription,
+            pv.v_productvariantid,
+            pv.v_productcode, pv.v_productmodel, pv.v_productsize, pv.v_productunit,
+            ${stockColumn ? `pv.${stockColumn}` : 'NULL'} AS stock_quantity,
+            p.v_productname
+       FROM public.tbl_quotationproductitem qpi
+       JOIN public.tbl_productvariant pv ON pv.v_productvariantid = qpi.v_productvariantid
+       JOIN public.tbl_product p ON p.v_productid = pv.v_productid
+      WHERE qpi.v_quotationid = ANY($1::uuid[])
+      ORDER BY qpi.v_createdat`,
+    [quotationIds],
+  )
+  const map = new Map()
+  for (const row of result.rows) {
+    const list = map.get(row.v_quotationid) || []
+    const unitPrice = quotationUnitPrice(row.v_unitprice)
+    const quantity = Number(row.v_quantity || 0)
+    list.push({
+      productVariantId: row.v_productvariantid,
+      productName: row.v_productname,
+      productCode: row.v_productcode,
+      productModel: row.v_productmodel,
+      productSize: row.v_productsize,
+      productUnit: row.v_productunit,
+      stock: row.stock_quantity === null || row.stock_quantity === undefined ? null : Number(row.stock_quantity),
+      quantity,
+      unitPrice,
+      lineTotal: unitPrice === null ? null : toMoneyNumber(unitPrice * quantity),
+      itemDescription: row.v_itemdescription,
+    })
+    map.set(row.v_quotationid, list)
+  }
+  return map
+}
+
 async function staffServiceRows() {
   const result = await pool.query(
     `SELECT sr.*, s.v_servicename, u.v_firstname, u.v_lastname, u.v_emailaddress, u.v_companyname, u.v_contactnumber
@@ -1889,6 +1957,7 @@ function customerName(row) {
 
 async function handleStaffWorkQueue(req, res) {
   const [quotations, serviceRequests] = await Promise.all([staffQuotationRows(), staffServiceRows()])
+  const quotationItems = await staffQuotationItemMap(quotations.map((row) => row.v_quotationid))
   const items = [
     ...quotations.map((row) => ({
       id: row.v_referencenumber,
@@ -1905,6 +1974,7 @@ async function handleStaffWorkQueue(req, res) {
       projectAddress: row.v_projectaddress,
       customerRemarks: row.v_customerremarks,
       totalAmount: toMoneyNumber(row.v_additionalcost),
+      items: quotationItems.get(row.v_quotationid) || [],
     })),
     ...serviceRequests.map((row) => ({
       id: row.v_referencenumber,
@@ -1921,7 +1991,8 @@ async function handleStaffWorkQueue(req, res) {
       projectAddress: row.v_projectaddress,
       preferredDate: row.v_preferreddate,
       preferredTime: row.v_preferredtime,
-      customerRemarks: row.v_customerremarks,
+      recurrenceFrequency: recurrenceFromRemarks(row.v_customerremarks),
+      customerRemarks: stripRecurrenceFromRemarks(row.v_customerremarks),
       problemDescription: row.v_problemdescription,
     })),
   ].sort((a, b) => new Date(b.submittedAt || 0) - new Date(a.submittedAt || 0))
@@ -1969,20 +2040,33 @@ async function handleStaffUpdateServiceRequest(req, res, staffUser, referenceNum
   const status = clean(body.status, 80) || 'Under Review'
   const preferredDate = nullable(body.preferredDate, 20)
   const preferredTime = normalizePreferredTime(nullable(body.preferredTime, 20))
+  const recurrenceFrequency = body.recurrenceFrequency === undefined ? '' : normalizeRecurrenceFrequency(body.recurrenceFrequency)
   const remarks = nullable(body.remarks, 1000)
   const scheduleError = validatePreferredSchedule(preferredDate, preferredTime)
   if (scheduleError) return sendJson(res, 400, { error: scheduleError })
 
   const result = await transaction(async (client) => {
+    const existing = await client.query(
+      `SELECT v_customerremarks
+         FROM public.tbl_servicerequest
+        WHERE v_referencenumber = $1
+        LIMIT 1`,
+      [referenceNumber],
+    )
+    const nextRemarks = recurrenceFrequency
+      ? customerRemarksWithRecurrence(stripRecurrenceFromRemarks(existing.rows[0]?.v_customerremarks), recurrenceFrequency)
+      : existing.rows[0]?.v_customerremarks
+
     const updated = await client.query(
       `UPDATE public.tbl_servicerequest
           SET v_requeststatus = $2,
               v_preferreddate = COALESCE($3::date, v_preferreddate),
               v_preferredtime = COALESCE($4::time, v_preferredtime),
+              v_customerremarks = COALESCE($5, v_customerremarks),
               v_updatedat = NOW()
         WHERE v_referencenumber = $1
         RETURNING *`,
-      [referenceNumber, status, preferredDate, preferredTime],
+      [referenceNumber, status, preferredDate, preferredTime, nextRemarks],
     )
     if (!updated.rowCount) return null
     await client.query(

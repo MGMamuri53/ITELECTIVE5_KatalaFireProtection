@@ -1,13 +1,30 @@
 import { useState } from 'react';
-import { Send } from 'lucide-react';
+import { RefreshCw, Send } from 'lucide-react';
 import { chatMessages } from './staffData';
 
-export function PageHeading({ title, copy }) {
+export function PageHeading({ title, copy, actions = null }) {
   return (
-    <div className="mb-8">
-      <h1 className="text-2xl font-bold text-slate-900 mb-1">{title}</h1>
-      <p className="text-slate-500">{copy}</p>
+    <div className="mb-8 flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+      <div>
+        <h1 className="text-2xl font-bold text-slate-900 mb-1">{title}</h1>
+        <p className="text-slate-500">{copy}</p>
+      </div>
+      {actions && <div className="flex flex-wrap gap-2">{actions}</div>}
     </div>
+  );
+}
+
+export function RefreshTableButton({ onClick, loading = false, label = 'Refresh table' }) {
+  return (
+    <button
+      type="button"
+      className="inline-flex min-h-10 items-center justify-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-bold text-slate-700 shadow-sm transition-colors hover:bg-slate-50 disabled:opacity-60"
+      onClick={onClick}
+      disabled={loading}
+    >
+      <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
+      {loading ? 'Refreshing...' : label}
+    </button>
   );
 }
 

@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { ChatPanel, PageHeading } from '../StaffShared';
+import { ChatPanel, PageHeading, RefreshTableButton } from '../StaffShared';
 import { threads } from '../staffData';
 
 function MessagesPage() {
@@ -7,7 +7,11 @@ function MessagesPage() {
 
   return (
     <>
-      <PageHeading title="Messages" copy="View customer conversations linked to quotation and service requests." />
+      <PageHeading
+        title="Messages"
+        copy="View customer conversations linked to quotation and service requests."
+        actions={<RefreshTableButton onClick={() => setSelected(threads[0])} label="Refresh table" />}
+      />
       <div className="grid grid-cols-1 lg:grid-cols-[420px_1fr] gap-6">
         <section className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
           {threads.map((thread) => (

@@ -6,13 +6,13 @@ import Services from './page_services'
 import Portfolio from './page_portfolio'
 import Company from './page_company_profile'
 import AdminPanel from './Admin/AdminPanel'
-import StaffPanel, { StaffCompleted, StaffMaintenance, StaffMessages, StaffServiceCalendar, StaffWorkQueue } from './Staff/StaffPanel'
+import StaffPanel, { StaffCompleted, StaffMaintenance, StaffMessages, StaffPaidAssignments, StaffServiceCalendar, StaffWorkQueue } from './Staff/StaffPanel'
 import Profile from './page_profile'
 import Signup from './page_signup'
 import Signin from './page_signin'
 import { getStoredSession, isAuthReady } from './services/katalaApi'
 
-const staffRoutes = new Set(['staff', 'staff-work-queue', 'staff-messages', 'staff-service-calendar', 'staff-maintenance', 'staff-completed'])
+const staffRoutes = new Set(['staff', 'staff-work-queue', 'staff-messages', 'staff-paid-assignments', 'staff-service-calendar', 'staff-maintenance', 'staff-completed'])
 const protectedRoutes = new Set(['admin', 'profile', ...staffRoutes])
 
 const routes = {
@@ -26,6 +26,7 @@ const routes = {
   staff: StaffPanel,
   'staff-work-queue': StaffWorkQueue,
   'staff-messages': StaffMessages,
+  'staff-paid-assignments': StaffPaidAssignments,
   'staff-service-calendar': StaffServiceCalendar,
   'staff-maintenance': StaffMaintenance,
   'staff-completed': StaffCompleted,

@@ -3,6 +3,7 @@ import {
   Bell,
   CalendarDays,
   CheckCircle2,
+  ClipboardCheck,
   ClipboardList,
   LogOut,
   MessageSquare,
@@ -16,6 +17,7 @@ import { authApi, getStoredSession } from '../services/katalaApi';
 const navItems = [
   { name: 'Work Queue', route: 'staff-work-queue', icon: ClipboardList },
   { name: 'Messages', route: 'staff-messages', icon: MessageSquare },
+  { name: 'Paid Assignments', route: 'staff-paid-assignments', icon: ClipboardCheck },
   { name: 'Service Calendar', route: 'staff-service-calendar', icon: CalendarDays },
   { name: 'Maintenance', route: 'staff-maintenance', icon: ShieldCheck },
   { name: 'Completed', route: 'staff-completed', icon: CheckCircle2 },

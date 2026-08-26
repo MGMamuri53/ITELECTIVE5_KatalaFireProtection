@@ -17,7 +17,6 @@ const emptyCheckout = {
   projectAddress: '',
   customerRemarks: '',
 }
-const temporaryUnitPrice = Number(import.meta.env.VITE_TEMP_QUOTATION_UNIT_PRICE || 0.99)
 
 const imageByCategory = {
   'Fire Extinguishers': extinguisherImage,
@@ -66,6 +65,11 @@ const peso = new Intl.NumberFormat('en-PH', {
 
 function formatPeso(value) {
   return peso.format(Number(value || 0))
+}
+
+function displayQuotationStatus(status) {
+  if (status === 'Accepted') return 'Ready for Payment'
+  return status === 'Submitted' ? 'Under Review' : (status || 'Under Review')
 }
 
 function normalizeKey(value) {
@@ -230,8 +234,8 @@ export default function Products() {
                       <h2>{item.name}</h2>
                       <p className="model-line">{item.model}</p>
                       <div className="product-price">
-                        <span>Temporary test price</span>
-                        <strong>{formatPeso(temporaryUnitPrice)}</strong>
+                        <span>Estimated pricing</span>
+                        <strong>For staff review</strong>
                       </div>
                       <p className="stock-line">{stockLabel(item, dbMaterials)}</p>
                       {item.variants.length > 0 && <p className="variant-preview">Shown options: {item.variants.join(', ')}</p>}
@@ -339,7 +343,7 @@ function ProductModal({ product, image, onClose, onAdd }) {
               <div><span>Model / reference</span><strong>{product.model}</strong></div>
               <div><span>Product description</span><strong>{product.profileLabel}</strong></div>
               <div><span>Listed options</span><strong>{product.variants.length ? product.variants.join(', ') : 'Configuration to be confirmed'}</strong></div>
-              <div><span>Price</span><strong>{formatPeso(temporaryUnitPrice)} temporary test price</strong></div>
+              <div><span>Estimated price</span><strong>Final amount after staff review</strong></div>
               <div><span>Availability</span><strong>Confirm with Katala</strong></div>
             </div>
 
@@ -544,7 +548,6 @@ function CartModal({ cart, setCart, onClose, onQuotationCreated, onManageQuotati
     .map((line) => ({ ...line, product: catalog.find((item) => item.id === line.productId) }))
     .filter((line) => line.product)
   const totalUnits = lines.reduce((sum, line) => sum + line.quantity, 0)
-  const temporaryCartTotal = lines.reduce((sum, line) => sum + (Number(line.quantity || 0) * temporaryUnitPrice), 0)
 
   function updateLine(index, patch) {
     setCart((current) => current.map((line, lineIndex) => lineIndex === index ? { ...line, ...patch } : line))
@@ -598,8 +601,8 @@ function CartModal({ cart, setCart, onClose, onQuotationCreated, onManageQuotati
           <div className="cart-heading">
             <div><span className="eyebrow">YOUR CART</span><h2 id="cart-title">Quotation request</h2></div>
             <div className="cart-heading-total">
-              <strong>{formatPeso(temporaryCartTotal)}</strong>
-              <span>{totalUnits} unit{totalUnits === 1 ? '' : 's'} at {formatPeso(temporaryUnitPrice)} each</span>
+              <strong>{totalUnits} item{totalUnits === 1 ? '' : 's'}</strong>
+              <span>Estimated amount after staff review</span>
             </div>
           </div>
 
@@ -611,7 +614,7 @@ function CartModal({ cart, setCart, onClose, onQuotationCreated, onManageQuotati
                   <div className="cart-line-copy">
                     <strong>{line.product.name}</strong>
                     <span>{line.product.model}</span>
-                    <span>{formatPeso(temporaryUnitPrice)} each - {formatPeso(Number(line.quantity || 0) * temporaryUnitPrice)} line total</span>
+                    <span>Material pricing will be set by Katala staff.</span>
                     {line.product.variants.length > 0 && (
                       <label>
                         Option
@@ -677,9 +680,9 @@ function CartModal({ cart, setCart, onClose, onQuotationCreated, onManageQuotati
               <h3>Quotation request submitted</h3>
               <p>{status.message}</p>
               <p><strong>Reference: {status.referenceNumber}</strong></p>
-              <p className="muted">PayMongo checkout appears in quotation management using the temporary PHP 0.99 test price.</p>
+              <p className="muted">Katala staff will review the request, set charges, and mark it ready for payment when finalized.</p>
               <div className="form-actions">
-                <button className="btn primary" type="button" onClick={onManageQuotation}>Manage quotation/payment</button>
+                <button className="btn primary" type="button" onClick={onManageQuotation}>Manage quotation</button>
                 <button className="btn secondary" type="button" onClick={onClose}>Done</button>
               </div>
             </div>
@@ -796,48 +799,9 @@ function ManageQuotationModal({ quotationRefs, setQuotationRefs, initialPaymentR
     }
   }
 
-  const editable = quotation?.status === 'Submitted'
+  const displayStatus = displayQuotationStatus(quotation?.status)
+  const editable = ['Submitted', 'Under Review'].includes(quotation?.status)
   const paid = quotation?.payment?.status === 'Paid'
-  const pricedAndAccepted = quotation?.canPay
-  const paymentReady = pricedAndAccepted && quotation?.paymongoConfigured && !paid
-  const paymentMessage = paid
-    ? `Paid${quotation.payment?.paidAt ? ` on ${new Date(quotation.payment.paidAt).toLocaleString()}` : ''}.`
-    : !quotation?.paymongoConfigured
-      ? 'PayMongo is not configured on the server yet. Add PAYMONGO_SECRET_KEY to katala-website/.env and restart the app.'
-      : pricedAndAccepted
-        ? 'This quotation is ready for secure PayMongo checkout using the temporary PHP 0.99 test price.'
-        : 'Payment becomes available after the quotation has a test or reviewed price.'
-
-  async function payQuotation() {
-    if (!selectedReference || checkoutStatus.type === 'loading') return
-    setCheckoutStatus({ type: 'loading', message: 'Creating PayMongo checkout...' })
-
-    try {
-      const data = await schemaApi.createPaymongoCheckout(selectedReference)
-      if (!data.checkoutUrl) throw new Error('PayMongo did not return a checkout URL.')
-      window.location.href = data.checkoutUrl
-    } catch (error) {
-      setCheckoutStatus({ type: 'error', message: error.message || 'Unable to create payment checkout.' })
-    }
-  }
-
-  async function openReceipt(paymentReference = quotation?.payment?.referenceNumber) {
-    if (!paymentReference || checkoutStatus.type === 'loading') return
-    setCheckoutStatus({ type: 'loading', message: 'Loading receipt...' })
-
-    try {
-      const data = await schemaApi.getPaymentReceipt(paymentReference)
-      setReceipt(data.receipt)
-      setCheckoutStatus({
-        type: data.receipt?.payment?.status === 'Paid' ? 'success' : 'loading',
-        message: data.receipt?.payment?.status === 'Paid'
-          ? 'Receipt loaded.'
-          : 'Payment is still pending. Please check again after PayMongo confirms the payment.',
-      })
-    } catch (error) {
-      setCheckoutStatus({ type: 'error', message: error.message || 'Unable to load receipt.' })
-    }
-  }
 
   return (
     <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
@@ -861,10 +825,8 @@ function ManageQuotationModal({ quotationRefs, setQuotationRefs, initialPaymentR
             <>
               <div className="managed-order-summary">
                 <div><span>Reference</span><strong>{quotation.referenceNumber}</strong></div>
-                <div><span>Status</span><strong>{quotation.status}</strong></div>
-                <div><span>Subtotal</span><strong>{formatPeso(quotation.subtotal)}</strong></div>
-                <div><span>Additional cost</span><strong>{formatPeso(quotation.additionalCost)}</strong></div>
-                <div><span>Total</span><strong>{formatPeso(quotation.totalAmount)}</strong></div>
+                <div><span>Status</span><strong>{displayStatus}</strong></div>
+                <div><span>Pricing</span><strong>{paid ? 'Paid' : 'Pending staff review'}</strong></div>
                 <div><span>Submitted</span><strong>{quotation.submittedAt ? new Date(quotation.submittedAt).toLocaleString() : '—'}</strong></div>
               </div>
 
@@ -877,38 +839,7 @@ function ManageQuotationModal({ quotationRefs, setQuotationRefs, initialPaymentR
                 ))}
               </div>
 
-              <div className="managed-price-lines">
-                {quotation.items?.map((item, index) => (
-                  <div key={`${item.productCode || item.productName}-price-${index}`}>
-                    <span>{item.productName} x {item.quantity}</span>
-                    <strong>
-                      {item.unitPrice !== null && item.unitPrice !== undefined
-                        ? `${formatPeso(item.unitPrice)} each = ${formatPeso(item.lineTotal)}`
-                        : 'No unit price'}
-                    </strong>
-                  </div>
-                ))}
-              </div>
-
-              <div className="payment-panel">
-                <div>
-                  <span className="eyebrow">PAYMENT</span>
-                  <h3>PayMongo transaction</h3>
-                  <p className="muted">{paymentMessage}</p>
-                </div>
-                <div className="payment-actions">
-                  <strong>{formatPeso(quotation.totalAmount)}</strong>
-                  {paid ? (
-                    <button className="btn primary" type="button" onClick={() => openReceipt()}>
-                      View receipt
-                    </button>
-                  ) : (
-                    <button className="btn primary" type="button" disabled={!paymentReady || checkoutStatus.type === 'loading'} onClick={payQuotation}>
-                      {checkoutStatus.type === 'loading' ? 'Preparing...' : 'Pay with PayMongo'}
-                    </button>
-                  )}
-                </div>
-              </div>
+              <div className="form-status loading">Final charges and payment will appear in your Profile after Katala staff reviews this quotation.</div>
 
               {checkoutStatus.type !== 'idle' && <div className={`form-status ${checkoutStatus.type}`}>{checkoutStatus.message}</div>}
 
@@ -921,7 +852,7 @@ function ManageQuotationModal({ quotationRefs, setQuotationRefs, initialPaymentR
                   <label className="wide">Customer remarks<textarea disabled={!editable} maxLength="2000" rows="3" name="customerRemarks" value={form.customerRemarks} onChange={update} /></label>
                 </div>
 
-                {!editable && <div className="form-status success">This quotation is read-only because its status is {quotation.status}.</div>}
+                {!editable && <div className="form-status success">This quotation is read-only because its status is {displayStatus}.</div>}
                 {status.type !== 'idle' && <div className={`form-status ${status.type}`}>{status.message}</div>}
 
                 <div className="form-actions manage-actions">

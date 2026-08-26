@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Nav, Footer, PageIntro, InfoNote } from './components'
 import { serviceLines } from './data/company'
 import { getStoredSession, isSignedIn, schemaApi } from './services/katalaApi'
+import { recurrenceOptions } from './Staff/staffWorkflow'
 
 const filters = ['All', 'Systems', 'Products', 'Maintenance']
 const typeMap = {
@@ -26,6 +27,10 @@ function localTimeNow() {
   const hour = String(now.getHours()).padStart(2, '0')
   const minute = String(now.getMinutes()).padStart(2, '0')
   return `${hour}:${minute}`
+}
+
+function isMaintenanceService(service) {
+  return typeMap[service.title] === 'Maintenance' || /maintenance|preventive/i.test(service.title)
 }
 
 function validatePreferredSchedule(preferredDate, preferredTime) {
@@ -55,6 +60,7 @@ const emptyServiceForm = {
   projectAddress: '',
   preferredDate: '',
   preferredTime: '',
+  recurrenceFrequency: 'One-time',
   priorityLevel: 'Normal',
   customerRemarks: '',
 }
@@ -109,6 +115,10 @@ export default function Services() {
                   </div>
                   <h2>{item.title}</h2>
                   <p>{item.copy}</p>
+                  <div className="service-estimate">
+                    <span>Estimated pricing</span>
+                    <strong>After site review</strong>
+                  </div>
                   <div className="proof-box">
                     <span>How we can help</span>
                     {item.proof}
@@ -141,6 +151,8 @@ function ServiceRequestModal({ service, onClose }) {
     ...emptyServiceForm,
     establishmentName: session?.user?.companyName || '',
     contactPerson: session?.user?.name || '',
+    contactNumber: session?.user?.contactNumber || '',
+    recurrenceFrequency: isMaintenanceService(service) ? 'Monthly' : 'One-time',
   }))
   const [status, setStatus] = useState({ type: 'idle', message: '', referenceNumber: '' })
   const closeRef = useRef(null)
@@ -221,7 +233,6 @@ function ServiceRequestModal({ service, onClose }) {
                 <label>Project name<input maxLength="160" name="projectName" value={form.projectName} onChange={update} /></label>
                 <label>Establishment / organization<input maxLength="160" name="establishmentName" value={form.establishmentName} onChange={update} /></label>
                 <label>Contact person<input maxLength="160" name="contactPerson" value={form.contactPerson} onChange={update} /></label>
-                <label>Contact number<input maxLength="60" name="contactNumber" value={form.contactNumber} onChange={update} /></label>
                 <label className="wide">Service requirement / problem description<textarea required minLength="5" maxLength="2500" rows="4" name="problemDescription" value={form.problemDescription} onChange={update} placeholder="Describe the equipment, issue, requested work, or site concern." /></label>
                 <label className="wide">Project address<textarea maxLength="1000" rows="2" name="projectAddress" value={form.projectAddress} onChange={update} /></label>
                 <label>
@@ -245,6 +256,12 @@ function ServiceRequestModal({ service, onClose }) {
                     disabled={!form.preferredDate}
                   />
                 </label>
+                {isMaintenanceService(service) && <label>
+                  Service frequency
+                  <select name="recurrenceFrequency" value={form.recurrenceFrequency} onChange={update}>
+                    {recurrenceOptions.filter((option) => option !== 'One-time').map((option) => <option key={option}>{option}</option>)}
+                  </select>
+                </label>}
                 <label>
                   Priority
                   <select name="priorityLevel" value={form.priorityLevel} onChange={update}>

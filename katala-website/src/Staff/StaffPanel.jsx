@@ -2,6 +2,7 @@ import StaffLayout from './StaffLayout';
 import CompletedPage from './pages/CompletedPage';
 import MaintenancePage from './pages/MaintenancePage';
 import MessagesPage from './pages/MessagesPage';
+import PaidAssignmentsPage from './pages/PaidAssignmentsPage';
 import ServiceCalendarPage from './pages/ServiceCalendarPage';
 import WorkQueuePage from './pages/WorkQueuePage';
 
@@ -15,6 +16,10 @@ export function StaffWorkQueue() {
 
 export function StaffMessages() {
   return <StaffRoute activePage="Messages"><MessagesPage /></StaffRoute>;
+}
+
+export function StaffPaidAssignments() {
+  return <StaffRoute activePage="Paid Assignments"><PaidAssignmentsPage /></StaffRoute>;
 }
 
 export function StaffServiceCalendar() {
