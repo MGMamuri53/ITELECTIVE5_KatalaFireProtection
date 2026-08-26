@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Filter, PackagePlus, Save, Trash2 } from 'lucide-react';
 import { schemaApi } from '../services/katalaApi';
+import { useAdminSearch } from './Layout';
 
 const emptyForm = {
   name: '',
@@ -33,6 +34,7 @@ function ProductManagement() {
   const [query, setQuery] = useState('');
   const [form, setForm] = useState(emptyForm);
   const [status, setStatus] = useState({ type: 'loading', message: 'Loading materials...' });
+  const { normalizedQuery } = useAdminSearch();
 
   useEffect(() => {
     loadMaterials();
@@ -107,10 +109,14 @@ function ProductManagement() {
   }
 
   const shown = useMemo(() => {
-    const needle = query.trim().toLowerCase();
-    if (!needle) return materials;
-    return materials.filter((item) => [item.sku, item.name, item.category, item.model, item.size].join(' ').toLowerCase().includes(needle));
-  }, [materials, query]);
+    const localNeedle = query.trim().toLowerCase();
+    const topNeedle = normalizedQuery;
+    if (!localNeedle && !topNeedle) return materials;
+    return materials.filter((item) => {
+      const haystack = [item.sku, item.name, item.category, item.model, item.size, item.status].join(' ').toLowerCase();
+      return (!localNeedle || haystack.includes(localNeedle)) && (!topNeedle || haystack.includes(topNeedle));
+    });
+  }, [materials, normalizedQuery, query]);
 
   const lowStock = materials.filter((item) => ['Low Stock', 'Out of Stock'].includes(item.status)).length;
 

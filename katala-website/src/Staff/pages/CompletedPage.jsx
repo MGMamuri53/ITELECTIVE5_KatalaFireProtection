@@ -1,11 +1,13 @@
 import { useEffect, useState } from 'react';
 import { PageHeading, RefreshTableButton, TableHeader } from '../StaffShared';
+import { useStaffSearch } from '../StaffLayout';
 import { schemaApi } from '../../services/katalaApi';
-import { isRecurringService, workflowItemsFromQueue } from '../staffWorkflow';
+import { filterStaffItems, isRecurringService, workflowItemsFromQueue } from '../staffWorkflow';
 
 function CompletedPage() {
   const [items, setItems] = useState([]);
   const [status, setStatus] = useState({ type: 'loading', message: 'Loading completed work...' });
+  const { normalizedQuery } = useStaffSearch();
 
   useEffect(() => {
     load();
@@ -28,6 +30,8 @@ function CompletedPage() {
     }
   }
 
+  const shown = filterStaffItems(items, normalizedQuery);
+
   return (
     <>
       <PageHeading
@@ -39,7 +43,7 @@ function CompletedPage() {
       <section className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
         <TableHeader columns={['Reference', 'Customer', 'Type', 'Completed', 'Result']} />
         <div className="divide-y divide-slate-100">
-          {items.map((item) => (
+          {shown.map((item) => (
             <div key={item.id} className="grid grid-cols-1 md:grid-cols-5 gap-3 md:gap-4 px-5 md:px-6 py-5 items-center hover:bg-slate-50/50 transition-colors">
               <span className="text-sm font-bold text-[#b3000c]">{item.id}</span>
               <span className="text-sm font-medium text-slate-900">{item.customer}</span>
@@ -48,7 +52,7 @@ function CompletedPage() {
               <span className="text-sm text-emerald-700 font-medium">{item.maintenanceClosed ? 'Maintenance plan ended' : `${item.subject} completed`}</span>
             </div>
           ))}
-          {!items.length && status.type === 'idle' && <div className="px-6 py-10 text-sm text-slate-500">No one-time services have been completed yet.</div>}
+          {!shown.length && status.type === 'idle' && <div className="px-6 py-10 text-sm text-slate-500">{normalizedQuery ? 'No completed work matches your search.' : 'No one-time services have been completed yet.'}</div>}
         </div>
       </section>
     </>

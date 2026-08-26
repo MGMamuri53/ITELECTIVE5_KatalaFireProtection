@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
 import { Clock, Plus, Save, Trash2 } from 'lucide-react';
 import { schemaApi } from '../services/katalaApi';
+import { useAdminSearch } from './Layout';
+import { filterBySearch } from '../shared/search';
 
 const emptyService = {
   code: '',
@@ -27,6 +29,7 @@ function ServiceManagement() {
   const [drafts, setDrafts] = useState({});
   const [form, setForm] = useState(emptyService);
   const [status, setStatus] = useState({ type: 'loading', message: 'Loading services...' });
+  const { normalizedQuery } = useAdminSearch();
 
   useEffect(() => {
     loadServices();
@@ -100,6 +103,8 @@ function ServiceManagement() {
     }
   }
 
+  const shown = filterBySearch(services, normalizedQuery, ['code', 'name', 'category', 'duration', 'description', 'status']);
+
   return (
     <>
       <div className="flex justify-between items-end mb-8">
@@ -144,7 +149,7 @@ function ServiceManagement() {
             <span></span>
           </div>
           <div className="divide-y divide-slate-100">
-            {services.map((service) => (
+            {shown.map((service) => (
               <div key={service.serviceId} className="grid grid-cols-6 gap-4 px-6 py-5 items-center hover:bg-slate-50/50 transition-colors">
                 <input className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm font-bold text-[#b3000c]" value={(drafts[service.serviceId] || serviceDraft(service)).code} onChange={(event) => updateDraft(service, { code: event.target.value })} />
                 <input className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm font-medium text-slate-900" value={(drafts[service.serviceId] || serviceDraft(service)).name} onChange={(event) => updateDraft(service, { name: event.target.value })} />
@@ -160,6 +165,9 @@ function ServiceManagement() {
                 </span>
               </div>
             ))}
+            {!shown.length && status.type !== 'loading' && (
+              <div className="px-6 py-10 text-sm text-slate-500">No services match your search.</div>
+            )}
           </div>
         </section>
       </div>

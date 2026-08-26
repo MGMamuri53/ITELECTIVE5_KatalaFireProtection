@@ -1,14 +1,16 @@
 import { useEffect, useMemo, useState } from 'react';
 import { CalendarClock, CheckCircle2, ChevronLeft, ChevronRight } from 'lucide-react';
 import { PageHeading, RefreshTableButton } from '../StaffShared';
+import { useStaffSearch } from '../StaffLayout';
 import { schemaApi } from '../../services/katalaApi';
-import { isRecurringService, staffMembers, upsertWorkflow, workflowItemsFromQueue } from '../staffWorkflow';
+import { completeRecurringVisit, filterStaffItems, isRecurringService, staffMembers, today, upsertWorkflow, workflowItemsFromQueue } from '../staffWorkflow';
 
 function ServiceCalendarPage() {
   const [items, setItems] = useState([]);
   const [monthDate, setMonthDate] = useState(() => startOfMonth(new Date()));
   const [focusedId, setFocusedId] = useState('');
   const [status, setStatus] = useState({ type: 'loading', message: 'Loading service calendar...' });
+  const { normalizedQuery } = useStaffSearch();
 
   useEffect(() => {
     load();
@@ -32,24 +34,30 @@ function ServiceCalendarPage() {
   }
 
   async function update(item, patch) {
+    if (patch.schedule?.date && patch.schedule.date < today()) {
+      setStatus({ type: 'error', message: 'Schedule date cannot be in the past.' });
+      return;
+    }
     const recurring = isRecurringService(item);
     if (patch.status === 'Completed' && !window.confirm(recurring
       ? `Complete this maintenance visit for ${item.id}? The recurring maintenance record will remain active.`
       : `Mark ${item.id} as completed? It will move to Completed Work.`)) return;
-    const visits = patch.status === 'Completed' && recurring
-      ? [...(item.visits || []), { completedAt: new Date().toISOString(), schedule: patch.schedule || item.schedule, staff: patch.schedule?.staff || item.schedule?.staff || '' }]
-      : item.visits;
-    upsertWorkflow(item.id, { ...patch, visits });
+    const workflowPatch = recurring ? completeRecurringVisit(item, patch) : patch;
+    const visits = workflowPatch.visits || item.visits;
+    upsertWorkflow(item.id, { ...workflowPatch, visits });
     if (item.kind !== 'Quotation') {
       await schemaApi.updateStaffServiceRequest(item.id, {
-        status: patch.status || item.status,
-        preferredDate: patch.schedule?.date || item.schedule?.date || '',
-        preferredTime: patch.schedule?.time || item.schedule?.time || '',
+        status: workflowPatch.status || patch.status || item.status,
+        preferredDate: workflowPatch.schedule?.date || patch.schedule?.date || item.schedule?.date || '',
+        preferredTime: workflowPatch.schedule?.time || patch.schedule?.time || item.schedule?.time || '',
+        recurrenceFrequency: workflowPatch.recurrenceFrequency || item.recurrenceFrequency || 'One-time',
         remarks: 'Updated from Staff service calendar',
-      }).catch(() => {});
+      });
     }
     load(false);
   }
+
+  const shown = filterStaffItems(items, normalizedQuery);
 
   return (
     <>
@@ -59,16 +67,16 @@ function ServiceCalendarPage() {
         actions={<RefreshTableButton onClick={() => load()} loading={status.type === 'loading'} />}
       />
       {status.type !== 'idle' && <Notice status={status} />}
-      <ScheduleMonthCalendar items={items} monthDate={monthDate} setMonthDate={setMonthDate} onJump={setFocusedId} />
+      <ScheduleMonthCalendar items={shown} monthDate={monthDate} setMonthDate={setMonthDate} onJump={setFocusedId} />
       <section className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
         <div className="hidden md:grid grid-cols-[minmax(230px,1.15fr)_1.1fr_1.35fr_1fr_auto] gap-4 px-6 py-4 bg-slate-50/50 text-xs font-bold text-slate-500 uppercase">
           <span>Date</span><span>Customer</span><span>Service</span><span>Assigned Staff</span><span>Action</span>
         </div>
         <div className="divide-y divide-slate-100">
-          {items.map((item) => (
+          {shown.map((item) => (
             <CalendarRow key={item.id} item={item} onUpdate={update} focused={focusedId === item.id} />
           ))}
-          {!items.length && status.type === 'idle' && <div className="px-6 py-10 text-sm text-slate-500">No scheduled services or maintenance visits yet.</div>}
+          {!shown.length && status.type === 'idle' && <div className="px-6 py-10 text-sm text-slate-500">{normalizedQuery ? 'No scheduled records match your search.' : 'No scheduled services or maintenance visits yet.'}</div>}
         </div>
       </section>
     </>
@@ -147,7 +155,7 @@ function CalendarRow({ item, onUpdate, focused = false }) {
   return (
     <div id={rowId(item.id)} className={`scroll-mt-24 grid grid-cols-1 md:grid-cols-[minmax(230px,1.15fr)_1.1fr_1.35fr_1fr_auto] gap-3 md:gap-4 px-5 md:px-6 py-5 items-start md:items-center hover:bg-slate-50/50 ${focused ? 'bg-red-50 ring-1 ring-[#b3000c]/20' : ''}`}>
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-2 min-w-0">
-        <input className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm" type="date" value={draft.date} onChange={(e) => setDraft({ ...draft, date: e.target.value })} />
+        <input className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm" type="date" min={today()} value={draft.date} onChange={(e) => setDraft({ ...draft, date: e.target.value })} />
         <input className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm" type="time" value={draft.time} onChange={(e) => setDraft({ ...draft, time: e.target.value })} />
       </div>
       <span className="text-sm font-medium text-slate-900">{item.customer}<br /><small className="text-slate-500">{item.id}</small></span>
@@ -160,7 +168,7 @@ function CalendarRow({ item, onUpdate, focused = false }) {
         <button type="button" className="inline-flex items-center gap-2 rounded-lg bg-[#b3000c] text-white px-3 py-2 text-sm font-bold disabled:opacity-50" disabled={!draft.date || !draft.time} onClick={() => onUpdate(item, { status: 'Scheduled', schedule: draft, serviceType: recurring ? 'Recurring' : 'One-time' })}>
           <CalendarClock className="w-4 h-4" /> Update schedule
         </button>
-        <button type="button" className="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-sm font-bold text-slate-700 disabled:opacity-50" disabled={!draft.date || !draft.time} onClick={() => onUpdate(item, { status: 'Completed', schedule: draft, serviceType: recurring ? 'Recurring' : 'One-time' })}>
+        <button type="button" className="inline-flex items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm font-bold text-emerald-700 hover:bg-emerald-100 disabled:opacity-50" disabled={!draft.date || !draft.time} onClick={() => onUpdate(item, { status: 'Completed', schedule: draft, serviceType: recurring ? 'Recurring' : 'One-time' })}>
           <CheckCircle2 className="w-4 h-4" /> {recurring ? 'Visit done' : 'Complete'}
         </button>
       </div>

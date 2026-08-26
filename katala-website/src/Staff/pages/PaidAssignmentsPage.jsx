@@ -1,13 +1,15 @@
 import { useEffect, useState } from 'react';
 import { CalendarClock, CheckCircle2 } from 'lucide-react';
 import { PageHeading, RefreshTableButton, StatusBadge } from '../StaffShared';
+import { useStaffSearch } from '../StaffLayout';
 import { schemaApi } from '../../services/katalaApi';
-import { isRecurringService, recurrenceOptions, staffMembers, upsertWorkflow, workflowItemsFromQueue } from '../staffWorkflow';
+import { completeRecurringVisit, filterStaffItems, isRecurringService, recurrenceOptions, staffMembers, today, upsertWorkflow, workflowItemsFromQueue } from '../staffWorkflow';
 
 function PaidAssignmentsPage() {
   const [items, setItems] = useState([]);
   const [selected, setSelected] = useState(null);
   const [status, setStatus] = useState({ type: 'loading', message: 'Loading paid services...' });
+  const { normalizedQuery } = useStaffSearch();
 
   useEffect(() => {
     load();
@@ -32,27 +34,31 @@ function PaidAssignmentsPage() {
   }
 
   async function update(item, patch) {
+    if (patch.schedule?.date && patch.schedule.date < today()) {
+      setStatus({ type: 'error', message: 'Schedule date cannot be in the past.' });
+      return;
+    }
     const complete = patch.status === 'Completed';
     if (complete && !window.confirm(`Mark ${item.id} as completed? ${isRecurringService(item) ? 'It will remain in Maintenance.' : 'It will move to Completed Work.'}`)) return;
 
-    const visits = complete && isRecurringService(item)
-      ? [...(item.visits || []), { completedAt: new Date().toISOString(), schedule: patch.schedule || item.schedule, staff: patch.schedule?.staff || item.schedule?.staff || '' }]
-      : item.visits;
+    const workflowPatch = complete && isRecurringService(item) ? completeRecurringVisit(item, patch) : patch;
+    const visits = workflowPatch.visits || item.visits;
 
-    const workflowPatch = { ...patch, visits };
-    upsertWorkflow(item.id, workflowPatch);
+    upsertWorkflow(item.id, { ...workflowPatch, visits });
     if (item.referenceNumber && item.referenceNumber !== item.id) upsertWorkflow(item.referenceNumber, workflowPatch);
     if (item.kind !== 'Quotation') {
       await schemaApi.updateStaffServiceRequest(item.id, {
-        status: patch.status || item.status,
-        preferredDate: patch.schedule?.date || item.schedule?.date || '',
-        preferredTime: patch.schedule?.time || item.schedule?.time || '',
-        recurrenceFrequency: patch.recurrenceFrequency || item.recurrenceFrequency || 'One-time',
+        status: workflowPatch.status || patch.status || item.status,
+        preferredDate: workflowPatch.schedule?.date || patch.schedule?.date || item.schedule?.date || '',
+        preferredTime: workflowPatch.schedule?.time || patch.schedule?.time || item.schedule?.time || '',
+        recurrenceFrequency: workflowPatch.recurrenceFrequency || patch.recurrenceFrequency || item.recurrenceFrequency || 'One-time',
         remarks: 'Updated from Paid service assignment',
-      }).catch(() => {});
+      });
     }
     load(false);
   }
+
+  const shown = filterStaffItems(items, normalizedQuery);
 
   return (
     <>
@@ -68,7 +74,7 @@ function PaidAssignmentsPage() {
             <span>Reference</span><span>Customer</span><span>Service</span><span>Status</span>
           </div>
           <div className="divide-y divide-slate-100">
-            {items.map((item) => (
+            {shown.map((item) => (
               <button key={item.id} type="button" onClick={() => setSelected(item)} className={`w-full grid grid-cols-1 md:grid-cols-[1fr_1.25fr_1.5fr_1fr] gap-3 md:gap-4 px-5 md:px-6 py-5 text-left hover:bg-slate-50 ${selected?.id === item.id ? 'bg-red-50/50' : 'bg-white'}`}>
                 <span className="text-sm font-bold text-[#b3000c]">{item.id}<br /><small className="text-slate-500 font-normal">{isRecurringService(item) ? 'Recurring' : 'One-time'}</small></span>
                 <span className="text-sm font-medium text-slate-900">{item.customer}<br /><small className="text-slate-500 font-normal">{item.email || item.contactNumber || 'No contact on file'}</small></span>
@@ -76,7 +82,7 @@ function PaidAssignmentsPage() {
                 <span><StatusBadge status={item.status} /></span>
               </button>
             ))}
-            {!items.length && status.type === 'idle' && <div className="px-6 py-10 text-sm text-slate-500">No paid services are waiting for assignment.</div>}
+            {!shown.length && status.type === 'idle' && <div className="px-6 py-10 text-sm text-slate-500">{normalizedQuery ? 'No paid assignments match your search.' : 'No paid services are waiting for assignment.'}</div>}
           </div>
         </section>
         {selected ? <AssignmentPanel item={selected} onUpdate={update} /> : <aside className="bg-white rounded-xl border border-slate-200 shadow-sm p-6 text-sm text-slate-500">Select a paid service to assign staff.</aside>}
@@ -128,7 +134,7 @@ function AssignmentPanel({ item, onUpdate }) {
       </dl>
 
       <div className="grid gap-3">
-        <Field label="Schedule date"><input type="date" value={draft.date} onChange={(e) => setDraft({ ...draft, date: e.target.value })} /></Field>
+        <Field label="Schedule date"><input type="date" min={today()} value={draft.date} onChange={(e) => setDraft({ ...draft, date: e.target.value })} /></Field>
         <Field label="Schedule time"><input type="time" value={draft.time} onChange={(e) => setDraft({ ...draft, time: e.target.value })} /></Field>
         <Field label="Responsible staff">
           <select value={draft.staff} onChange={(e) => setDraft({ ...draft, staff: e.target.value })}>

@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
 import { CheckCircle2, RefreshCw, ShieldCheck, UserCog, Users } from 'lucide-react';
 import { schemaApi } from '../services/katalaApi';
+import { useAdminSearch } from './Layout';
+import { filterBySearch } from '../shared/search';
 
 const roleOptions = [
   { value: 'customer', label: 'Customer' },
@@ -15,6 +17,7 @@ function AccountManagement() {
   const [summary, setSummary] = useState({ customers: 0, staff: 0, pending: 0 });
   const [drafts, setDrafts] = useState({});
   const [status, setStatus] = useState({ type: 'loading', message: 'Loading accounts...' });
+  const { normalizedQuery } = useAdminSearch();
 
   useEffect(() => {
     loadAccounts();
@@ -28,7 +31,13 @@ function AccountManagement() {
       setSummary(data.summary || { customers: 0, staff: 0, pending: 0 });
       setDrafts(Object.fromEntries((data.accounts || []).map((account) => [
         account.id,
-        { role: account.role, status: account.status },
+        {
+          role: account.role,
+          status: account.status,
+          assignedStaffName: account.assignedStaffName || '',
+          staffDesignation: account.staffDesignation || '',
+          department: account.department || '',
+        },
       ])));
       setStatus({ type: 'idle', message: '' });
     } catch (error) {
@@ -50,15 +59,32 @@ function AccountManagement() {
     const account = accounts.find((item) => item.id === accountId);
     const draft = patch || drafts[accountId];
     if (!account || !draft) return;
+    const payload = {
+      role: draft.role,
+      status: draft.status,
+      ...(draft.role === 'staff'
+        ? {
+            assignedStaffName: draft.assignedStaffName || '',
+            staffDesignation: draft.staffDesignation || '',
+            department: draft.department || '',
+          }
+        : {}),
+    };
 
     setStatus({ type: 'loading', message: 'Saving account...' });
     try {
-      const data = await schemaApi.updateAdminAccount(accountId, draft);
+      const data = await schemaApi.updateAdminAccount(accountId, payload);
       setAccounts(data.accounts || []);
       setSummary(data.summary || { customers: 0, staff: 0, pending: 0 });
       setDrafts(Object.fromEntries((data.accounts || []).map((item) => [
         item.id,
-        { role: item.role, status: item.status },
+        {
+          role: item.role,
+          status: item.status,
+          assignedStaffName: item.assignedStaffName || '',
+          staffDesignation: item.staffDesignation || '',
+          department: item.department || '',
+        },
       ])));
       setStatus({ type: 'success', message: 'Account updated.' });
     } catch (error) {
@@ -66,7 +92,8 @@ function AccountManagement() {
     }
   }
 
-  const pendingStaff = accounts.filter((account) => account.role === 'staff' && account.status === 'Pending');
+  const shown = filterBySearch(accounts, normalizedQuery, ['accountId', 'name', 'email', 'role', 'status', 'companyName', 'contactNumber', 'assignedStaffName', 'staffDesignation', 'department']);
+  const pendingStaff = shown.filter((account) => account.role === 'staff' && account.status === 'Pending');
 
   return (
     <div className="flex flex-col gap-6">
@@ -131,12 +158,13 @@ function AccountManagement() {
               <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Name</th>
               <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Email</th>
               <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Role</th>
+              <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Staff Assignment</th>
               <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Status</th>
               <th className="px-6 py-4"></th>
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
-            {accounts.map((account) => {
+            {shown.map((account) => {
               const draft = drafts[account.id] || { role: account.role, status: account.status };
               return (
                 <tr key={account.id} className="hover:bg-slate-50/50 transition-colors">
@@ -149,6 +177,13 @@ function AccountManagement() {
                     </select>
                   </td>
                   <td className="px-6 py-4">
+                    <div className="grid gap-2 min-w-52">
+                      <input className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 disabled:bg-slate-50 disabled:text-slate-400" disabled={draft.role !== 'staff'} placeholder="Assigned staff name" value={draft.assignedStaffName || ''} onChange={(event) => updateDraft(account.id, 'assignedStaffName', event.target.value)} />
+                      <input className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-600 disabled:bg-slate-50 disabled:text-slate-400" disabled={draft.role !== 'staff'} placeholder="Designation" value={draft.staffDesignation || ''} onChange={(event) => updateDraft(account.id, 'staffDesignation', event.target.value)} />
+                      <input className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-600 disabled:bg-slate-50 disabled:text-slate-400" disabled={draft.role !== 'staff'} placeholder="Department / team" value={draft.department || ''} onChange={(event) => updateDraft(account.id, 'department', event.target.value)} />
+                    </div>
+                  </td>
+                  <td className="px-6 py-4">
                     <select className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700" value={draft.status} onChange={(event) => updateDraft(account.id, 'status', event.target.value)}>
                       {statusOptions.map((option) => <option key={option} value={option}>{option}</option>)}
                     </select>
@@ -159,9 +194,9 @@ function AccountManagement() {
                 </tr>
               );
             })}
-            {!accounts.length && status.type !== 'loading' && (
+            {!shown.length && status.type !== 'loading' && (
               <tr>
-                <td className="px-6 py-10 text-center text-sm text-slate-500" colSpan="6">No accounts found.</td>
+                <td className="px-6 py-10 text-center text-sm text-slate-500" colSpan="7">{normalizedQuery ? 'No accounts match your search.' : 'No accounts found.'}</td>
               </tr>
             )}
           </tbody>

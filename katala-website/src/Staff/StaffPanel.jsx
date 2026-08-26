@@ -4,6 +4,7 @@ import MaintenancePage from './pages/MaintenancePage';
 import MessagesPage from './pages/MessagesPage';
 import PaidAssignmentsPage from './pages/PaidAssignmentsPage';
 import ServiceCalendarPage from './pages/ServiceCalendarPage';
+import SettingsPage from './pages/SettingsPage';
 import WorkQueuePage from './pages/WorkQueuePage';
 
 function StaffRoute({ activePage, children }) {
@@ -32,6 +33,10 @@ export function StaffMaintenance() {
 
 export function StaffCompleted() {
   return <StaffRoute activePage="Completed"><CompletedPage /></StaffRoute>;
+}
+
+export function StaffSettings() {
+  return <StaffRoute activePage="Settings"><SettingsPage /></StaffRoute>;
 }
 
 export default StaffWorkQueue;

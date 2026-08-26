@@ -153,8 +153,8 @@ export function normalizeQuotation(quotation = {}, item = {}) {
 }
 
 export function normalizeCharge(charge = {}) {
-  const quantity = numberOrDefault(charge.quantity, 1);
-  const unitPrice = money(charge.unitPrice);
+  const quantity = charge.quantity === '' ? '' : numberOrDefault(charge.quantity, 1);
+  const unitPrice = charge.unitPrice === '' ? '' : money(charge.unitPrice);
   const materialCode = charge.materialCode || materialCodeFromDescription(charge.description);
   return {
     id: charge.id || cryptoId(),
@@ -165,7 +165,7 @@ export function normalizeCharge(charge = {}) {
     description: cleanMaterialDescription(charge.description, materialCode),
     quantity,
     unitPrice,
-    subtotal: money(quantity * unitPrice),
+    subtotal: money(Number(quantity || 0) * Number(unitPrice || 0)),
     sourceItemKey: charge.sourceItemKey || '',
   };
 }
@@ -188,6 +188,96 @@ export function buildReceipt(item, payment = {}) {
 
 export function workflowItemsFromQueue(items) {
   return items.map(overlayWorkflow);
+}
+
+export function staffSearchFields(item) {
+  return [
+    item.id,
+    item.referenceNumber,
+    item.kind,
+    item.customer,
+    item.customerName,
+    item.company,
+    item.email,
+    item.contactNumber,
+    item.subject,
+    item.serviceName,
+    item.productName,
+    item.projectName,
+    item.establishmentName,
+    item.projectAddress,
+    item.schedule?.staff,
+    item.staff,
+    item.status,
+    item.priority,
+    item.recurrenceFrequency,
+    item.schedule?.date,
+    item.schedule?.time,
+    item.preferredDate,
+    item.preferredTime,
+    item.submittedAt,
+    item.updatedAt,
+    ...(Array.isArray(item.items) ? item.items.flatMap((line) => [
+      line.productName,
+      line.productCode,
+      line.productModel,
+      line.productSize,
+      line.quantity,
+    ]) : []),
+  ];
+}
+
+export function matchesStaffSearch(item, query) {
+  const needle = String(query || '').trim().replace(/\s+/g, ' ').toLowerCase();
+  if (!needle) return true;
+  return staffSearchFields(item).some((value) =>
+    String(value || '').trim().replace(/\s+/g, ' ').toLowerCase().includes(needle)
+  );
+}
+
+export function filterStaffItems(items, query) {
+  const needle = String(query || '').trim();
+  if (!needle) return items;
+  return items.filter((item) => matchesStaffSearch(item, needle));
+}
+
+export function completeRecurringVisit(item, patch = {}) {
+  if (!isRecurringService(item) || patch.maintenanceClosed || patch.status !== 'Completed') {
+    return patch;
+  }
+
+  const completedSchedule = normalizeSchedule(patch.schedule || item.schedule || scheduleFromItem(item));
+  if (!completedSchedule.date) return patch;
+
+  const visitKey = visitScheduleKey(completedSchedule);
+  const visits = Array.isArray(item.visits) ? [...item.visits] : [];
+  const alreadyRecorded = visits.some((visit) => visitScheduleKey(visit.schedule || visit) === visitKey);
+  const nextVisits = alreadyRecorded
+    ? visits
+    : [
+        ...visits,
+        {
+          completedAt: new Date().toISOString(),
+          schedule: completedSchedule,
+          staff: completedSchedule.staff || '',
+          recurrenceFrequency: patch.recurrenceFrequency || item.recurrenceFrequency || 'Monthly',
+        },
+      ];
+  const anchorDay = Number(item.recurrenceAnchorDay) || dayFromDate(completedSchedule.date);
+  const nextDate = nextRecurringDate(completedSchedule.date, patch.recurrenceFrequency || item.recurrenceFrequency || 'Monthly', anchorDay);
+
+  return {
+    ...patch,
+    status: 'Scheduled',
+    serviceType: 'Recurring',
+    visits: nextVisits,
+    recurrenceAnchorDay: anchorDay,
+    lastCompletedVisitKey: visitKey,
+    schedule: {
+      ...completedSchedule,
+      date: nextDate,
+    },
+  };
 }
 
 export function isRecurringService(item) {
@@ -378,6 +468,56 @@ function scheduleFromItem(item) {
     time: item.preferredTime || '',
     staff: item.staff || '',
   };
+}
+
+function normalizeSchedule(schedule = {}) {
+  return {
+    date: schedule.date || '',
+    time: schedule.time || '',
+    staff: schedule.staff || '',
+  };
+}
+
+function visitScheduleKey(schedule = {}) {
+  return [schedule.date || '', schedule.time || '', schedule.staff || ''].join('|');
+}
+
+function nextRecurringDate(dateValue, frequency, anchorDay) {
+  const [year, month, day] = String(dateValue || '').split('-').map(Number);
+  if (!year || !month || !day) return dateValue;
+  const months = recurrenceMonthOffset(frequency);
+  if (months === 0) return addDays(dateValue, 7);
+  const zeroMonth = month - 1 + months;
+  const targetYear = year + Math.floor(zeroMonth / 12);
+  const targetMonthIndex = ((zeroMonth % 12) + 12) % 12;
+  const targetDay = Math.min(Number(anchorDay) || day, daysInMonth(targetYear, targetMonthIndex));
+  return dateValueFromParts(targetYear, targetMonthIndex + 1, targetDay);
+}
+
+function recurrenceMonthOffset(frequency) {
+  if (frequency === 'Quarterly') return 3;
+  if (frequency === 'Half-year') return 6;
+  if (frequency === 'Yearly') return 12;
+  return frequency === 'Weekly' ? 0 : 1;
+}
+
+function addDays(dateValue, offset) {
+  const [year, month, day] = String(dateValue || '').split('-').map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  date.setUTCDate(date.getUTCDate() + offset);
+  return dateValueFromParts(date.getUTCFullYear(), date.getUTCMonth() + 1, date.getUTCDate());
+}
+
+function daysInMonth(year, monthIndex) {
+  return new Date(Date.UTC(year, monthIndex + 1, 0)).getUTCDate();
+}
+
+function dayFromDate(dateValue) {
+  return Number(String(dateValue || '').split('-')[2]) || null;
+}
+
+function dateValueFromParts(year, month, day) {
+  return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
 }
 
 function inferServiceType(item) {

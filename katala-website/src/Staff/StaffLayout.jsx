@@ -1,13 +1,15 @@
-import { useEffect, useRef, useState } from 'react';
+import { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Bell,
   CalendarDays,
   CheckCircle2,
+  CircleX,
   ClipboardCheck,
   ClipboardList,
   LogOut,
   MessageSquare,
   Search,
+  Settings,
   ShieldCheck,
   User,
   UserRound,
@@ -21,10 +23,26 @@ const navItems = [
   { name: 'Service Calendar', route: 'staff-service-calendar', icon: CalendarDays },
   { name: 'Maintenance', route: 'staff-maintenance', icon: ShieldCheck },
   { name: 'Completed', route: 'staff-completed', icon: CheckCircle2 },
+  { name: 'Settings', route: 'staff-settings', icon: Settings },
 ];
 
+const StaffSearchContext = createContext({ query: '', normalizedQuery: '', setQuery: () => {}, clearQuery: () => {} });
+
+export function useStaffSearch() {
+  return useContext(StaffSearchContext);
+}
+
 function StaffLayout({ activePage, children }) {
+  const [query, setQuery] = useState('');
+  const searchValue = useMemo(() => ({
+    query,
+    normalizedQuery: query.trim().replace(/\s+/g, ' ').toLowerCase(),
+    setQuery,
+    clearQuery: () => setQuery(''),
+  }), [query]);
+
   return (
+    <StaffSearchContext.Provider value={searchValue}>
     <div className="min-h-screen bg-[#f8fafc] font-sans text-slate-900">
       <aside className="w-[250px] h-screen bg-[#334155] text-white fixed left-0 top-0 flex flex-col py-6 border-r border-slate-700">
         <div className="px-6 mb-10 flex items-center gap-3">
@@ -57,7 +75,18 @@ function StaffLayout({ activePage, children }) {
           <h2 className="text-[#b3000c] font-bold text-xl">Staff Portal</h2>
           <div className="max-w-md w-full relative">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 w-4 h-4" />
-            <input className="w-full bg-slate-50 border border-slate-200 rounded-lg py-2 pl-10 pr-4 text-sm focus:outline-none focus:ring-2 focus:ring-[#b3000c]/20 transition-all" placeholder="Search quote, service, customer, or schedule..." />
+            <input
+              className="w-full bg-slate-50 border border-slate-200 rounded-lg py-2 pl-10 pr-10 text-sm focus:outline-none focus:ring-2 focus:ring-[#b3000c]/20 transition-all"
+              placeholder="Search quote, service, customer, or schedule..."
+              type="search"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+            />
+            {query && (
+              <button type="button" className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700" onClick={() => setQuery('')} aria-label="Clear staff search">
+                <CircleX className="w-4 h-4" />
+              </button>
+            )}
           </div>
         </div>
         <div className="flex items-center gap-4">
@@ -73,6 +102,7 @@ function StaffLayout({ activePage, children }) {
         <div className="max-w-7xl mx-auto">{children}</div>
       </main>
     </div>
+    </StaffSearchContext.Provider>
   );
 }
 

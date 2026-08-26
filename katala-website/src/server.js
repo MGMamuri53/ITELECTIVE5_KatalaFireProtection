@@ -477,15 +477,22 @@ function accountDto(row) {
     status: normalizeAccountStatus(row.v_accountstatus),
     companyName: row.v_companyname || '',
     contactNumber: row.v_contactnumber || '',
+    assignedStaffName: row.assigned_staff_name || '',
+    staffDesignation: row.staff_designation || '',
+    department: row.department || '',
     createdAt: row.v_createdat,
   }
 }
 
 async function listAccounts(client = pool) {
+  const userColumns = await tableColumns('tbl_user', client)
   const result = await client.query(
     `SELECT DISTINCT ON (u.v_userid)
             u.v_userid, u.v_firstname, u.v_lastname, u.v_emailaddress, u.v_contactnumber,
             u.v_accountstatus, u.v_companyname, u.v_createdat,
+            ${optionalSelect(userColumns, ['v_assignedstaffname', 'v_assignedstaff', 'v_staffname'], 'assigned_staff_name')},
+            ${optionalSelect(userColumns, ['v_staffdesignation', 'v_designation'], 'staff_designation')},
+            ${optionalSelect(userColumns, ['v_department', 'v_team'], 'department')},
             r.v_rolename AS role_name
        FROM public.tbl_user u
        LEFT JOIN public.tbl_userrole ur ON ur.v_userid = u.v_userid
@@ -521,6 +528,10 @@ async function handleUpdateAccount(req, res, userId) {
   const body = await readBody(req)
   const nextRole = body.role === undefined ? '' : normalizePortalRole(body.role)
   const nextStatus = body.status === undefined ? '' : normalizeAccountStatus(body.status, '')
+  const assignedStaffName = body.assignedStaffName === undefined ? undefined : nullable(body.assignedStaffName, 160)
+  const staffDesignation = body.staffDesignation === undefined ? undefined : nullable(body.staffDesignation, 160)
+  const department = body.department === undefined ? undefined : nullable(body.department, 160)
+  const hasAssignmentPatch = assignedStaffName !== undefined || staffDesignation !== undefined || department !== undefined
   if (body.role !== undefined && !nextRole) return sendJson(res, 400, { error: 'Select a valid role.' })
   if (body.status !== undefined && !nextStatus) return sendJson(res, 400, { error: 'Select a valid account status.' })
 
@@ -531,6 +542,12 @@ async function handleUpdateAccount(req, res, userId) {
       error.statusCode = 404
       throw error
     }
+    const effectiveRole = nextRole || await databaseRole(userId)
+    if (hasAssignmentPatch && effectiveRole !== 'staff') {
+      const error = new Error('ASSIGNMENT_REQUIRES_STAFF')
+      error.statusCode = 400
+      throw error
+    }
     if (nextStatus) {
       await client.query(
         'UPDATE public.tbl_user SET v_accountstatus = $2, v_updatedat = now() WHERE v_userid = $1',
@@ -538,9 +555,41 @@ async function handleUpdateAccount(req, res, userId) {
       )
     }
     if (nextRole) await assignSingleRole(client, userId, nextRole)
+    if (hasAssignmentPatch) await updateStaffAssignment(client, userId, { assignedStaffName, staffDesignation, department })
   })
 
   return sendJson(res, 200, { ok: true, ...(await listAccounts()) })
+}
+
+async function updateStaffAssignment(client, userId, values) {
+  const userColumns = await tableColumns('tbl_user', client)
+  const mapping = [
+    ['assignedStaffName', ['v_assignedstaffname', 'v_assignedstaff', 'v_staffname']],
+    ['staffDesignation', ['v_staffdesignation', 'v_designation']],
+    ['department', ['v_department', 'v_team']],
+  ]
+  const assignments = []
+  const params = [userId]
+
+  for (const [field, candidates] of mapping) {
+    if (values[field] === undefined) continue
+    const column = firstColumn(userColumns, candidates)
+    if (!column) {
+      const error = new Error('STAFF_ASSIGNMENT_SCHEMA_MISSING')
+      error.statusCode = 409
+      throw error
+    }
+    params.push(values[field])
+    assignments.push(`${column} = $${params.length}`)
+  }
+
+  if (!assignments.length) return
+  await client.query(
+    `UPDATE public.tbl_user
+        SET ${assignments.join(', ')}, v_updatedat = now()
+      WHERE v_userid = $1`,
+    params,
+  )
 }
 
 function csvCell(value) {
@@ -753,6 +802,13 @@ function quotationFields(body) {
   }
 }
 
+function validateQuotationFields(fields) {
+  if (!fields.projectName && !fields.establishmentName) return 'Project name or establishment is required.'
+  if (!fields.projectAddress) return 'Project address is required.'
+  if (!fields.projectDescription || fields.projectDescription.length < 5) return 'Project description must be at least 5 characters.'
+  return ''
+}
+
 function manilaNowParts() {
   const parts = new Intl.DateTimeFormat('en-CA', {
     timeZone: 'Asia/Manila',
@@ -823,6 +879,12 @@ function serviceRequestFields(body) {
 
   const problemDescription = clean(body.problemDescription, 2500)
   if (problemDescription.length < 5) return { error: 'Please describe the service requirement.' }
+  const contactPerson = clean(body.contactPerson, 160)
+  if (!contactPerson) return { error: 'Contact person is required.' }
+  const contactNumber = clean(body.contactNumber, 60)
+  if (!/^[+()\d\s.-]{7,30}$/.test(contactNumber)) return { error: 'Enter a valid contact number.' }
+  const projectAddress = clean(body.projectAddress, 1000)
+  if (!projectAddress) return { error: 'Service address is required.' }
 
   const preferredDate = nullable(body.preferredDate, 20)
   const preferredTimeRaw = nullable(body.preferredTime, 20)
@@ -832,6 +894,9 @@ function serviceRequestFields(body) {
 
   const userAddressId = nullable(body.userAddressId, 80)
   if (userAddressId && !isUuid(userAddressId)) return { error: 'Invalid saved address.' }
+  if (body.recurrenceFrequency !== undefined && !isSupportedRecurrenceFrequency(body.recurrenceFrequency)) {
+    return { error: 'Invalid recurrence frequency.' }
+  }
   const recurrenceFrequency = normalizeRecurrenceFrequency(body.recurrenceFrequency)
   const customerRemarks = nullable(body.customerRemarks, 2000)
 
@@ -840,10 +905,10 @@ function serviceRequestFields(body) {
       userAddressId,
       projectName: nullable(body.projectName, 160),
       establishmentName: nullable(body.establishmentName, 160),
-      contactPerson: nullable(body.contactPerson, 160),
-      contactNumber: nullable(body.contactNumber, 60),
+      contactPerson,
+      contactNumber,
       problemDescription,
-      projectAddress: nullable(body.projectAddress, 1000),
+      projectAddress,
       preferredDate,
       preferredTime,
       recurrenceFrequency,
@@ -861,6 +926,11 @@ function normalizeRecurrenceFrequency(value) {
   if (normalized === 'half-year' || normalized === 'half year' || normalized === 'semiannual' || normalized === 'semi-annual') return 'Half-year'
   if (normalized === 'yearly' || normalized === 'annual' || normalized === 'annually') return 'Yearly'
   return 'One-time'
+}
+
+function isSupportedRecurrenceFrequency(value) {
+  const normalized = String(value || 'One-time').trim().toLowerCase()
+  return ['one-time', 'one time', 'weekly', 'monthly', 'quarterly', 'half-year', 'half year', 'semiannual', 'semi-annual', 'yearly', 'annual', 'annually'].includes(normalized)
 }
 
 function customerRemarksWithRecurrence(remarks, recurrenceFrequency) {
@@ -1081,6 +1151,8 @@ async function handleCreateQuotation(req, res, userId) {
   const itemResult = validateQuotationItems(body)
   if (itemResult.error) return sendJson(res, 400, { error: itemResult.error })
   const fields = quotationFields(body)
+  const fieldError = validateQuotationFields(fields)
+  if (fieldError) return sendJson(res, 400, { error: fieldError })
   const referenceNumber = createReference('QT')
 
   const result = await transaction(async (client) => {
@@ -1197,6 +1269,8 @@ async function handleGetQuotation(req, res, userId, referenceNumber) {
 async function handleUpdateQuotation(req, res, userId, referenceNumber) {
   const body = await readBody(req)
   const fields = quotationFields(body)
+  const fieldError = validateQuotationFields(fields)
+  if (fieldError) return sendJson(res, 400, { error: fieldError })
 
   const result = await pool.query(
     `UPDATE public.tbl_quotation
@@ -1245,7 +1319,7 @@ async function handleCancelQuotation(req, res, userId, referenceNumber) {
     if (!quotation.rowCount) return { notFound: true }
 
     const row = quotation.rows[0]
-    if (['Accepted', 'Rejected', 'Expired', 'Cancelled'].includes(row.v_quotationstatus)) {
+    if (!['Submitted', 'Under Review'].includes(row.v_quotationstatus)) {
       return { blocked: row.v_quotationstatus }
     }
 
@@ -2008,6 +2082,15 @@ async function handleStaffUpdateQuotation(req, res, staffUser, referenceNumber) 
     : toMoneyNumber(body.additionalCost)
   const validUntil = nullable(body.validUntil, 20)
   const remarks = nullable(body.remarks, 1000)
+  if (body.additionalCost !== '' && body.additionalCost !== null && body.additionalCost !== undefined) {
+    const rawAdditionalCost = Number(body.additionalCost)
+    if (!Number.isFinite(rawAdditionalCost) || rawAdditionalCost < 0) {
+      return sendJson(res, 400, { error: 'Additional cost must be a non-negative number.' })
+    }
+  }
+  if (validUntil && (!validIsoDate(validUntil) || validUntil < manilaNowParts().date)) {
+    return sendJson(res, 400, { error: 'Quotation validity date cannot be in the past.' })
+  }
 
   const result = await transaction(async (client) => {
     const updated = await client.query(
@@ -2040,6 +2123,9 @@ async function handleStaffUpdateServiceRequest(req, res, staffUser, referenceNum
   const status = clean(body.status, 80) || 'Under Review'
   const preferredDate = nullable(body.preferredDate, 20)
   const preferredTime = normalizePreferredTime(nullable(body.preferredTime, 20))
+  if (body.recurrenceFrequency !== undefined && !isSupportedRecurrenceFrequency(body.recurrenceFrequency)) {
+    return sendJson(res, 400, { error: 'Invalid recurrence frequency.' })
+  }
   const recurrenceFrequency = body.recurrenceFrequency === undefined ? '' : normalizeRecurrenceFrequency(body.recurrenceFrequency)
   const remarks = nullable(body.remarks, 1000)
   const scheduleError = validatePreferredSchedule(preferredDate, preferredTime)
@@ -2402,6 +2488,8 @@ const server = http.createServer(async (req, res) => {
     console.error(error)
     if (error.message === 'PAYLOAD_TOO_LARGE') return sendJson(res, 413, { error: 'Submission is too large.' })
     if (error instanceof SyntaxError) return sendJson(res, 400, { error: 'Invalid JSON request body.' })
+    if (error.message === 'ASSIGNMENT_REQUIRES_STAFF') return sendJson(res, 400, { error: 'Only staff accounts can receive staff assignment details.' })
+    if (error.message === 'STAFF_ASSIGNMENT_SCHEMA_MISSING') return sendJson(res, 409, { error: 'Staff assignment columns are missing. Run database/katala_staff_assignment_migration.sql in Supabase.' })
     const friendly = friendlyDatabaseError(error)
     return sendJson(res, error.statusCode || 500, { error: friendly || 'Server/database error. No table was created or altered.' })
   }

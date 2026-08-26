@@ -1,12 +1,20 @@
 import { useEffect, useState } from 'react';
 import { CheckCircle2, ClipboardList, Clock, RefreshCw } from 'lucide-react';
 import { schemaApi } from '../services/katalaApi';
+import { useAdminSearch } from './Layout';
+import { filterBySearch } from '../shared/search';
+
+function today() {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+}
 
 function QuotationRequests() {
   const [items, setItems] = useState([]);
   const [selected, setSelected] = useState(null);
   const [actionDraft, setActionDraft] = useState({ status: 'Submitted', additionalCost: '', validUntil: '', remarks: '' });
   const [status, setStatus] = useState({ type: 'loading', message: 'Loading requests...' });
+  const { normalizedQuery } = useAdminSearch();
 
   useEffect(() => {
     loadRequests();
@@ -50,6 +58,7 @@ function QuotationRequests() {
   const pending = items.filter((item) => item.status === 'Submitted').length;
   const review = items.filter((item) => /review/i.test(item.status || '')).length;
   const quoted = items.filter((item) => /accepted|approved|payment|quoted/i.test(item.status || '')).length;
+  const shown = filterBySearch(items, normalizedQuery, ['id', 'customer', 'email', 'subject', 'status', 'submittedAt', 'projectAddress', 'customerRemarks']);
 
   return (
     <>
@@ -99,7 +108,7 @@ function QuotationRequests() {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {items.map((item) => (
+              {shown.map((item) => (
                 <tr key={item.id} onClick={() => setSelected(item)} className={`hover:bg-slate-50/50 transition-colors cursor-pointer ${selected?.id === item.id ? 'bg-red-50/50' : ''}`}>
                   <td className="px-6 py-4 text-sm font-bold text-[#b3000c]">{item.id}</td>
                   <td className="px-6 py-4 text-sm font-medium text-slate-900">{item.customer}</td>
@@ -108,6 +117,11 @@ function QuotationRequests() {
                   <td className="px-6 py-4"><StatusPill status={item.status} /></td>
                 </tr>
               ))}
+              {!shown.length && status.type !== 'loading' && (
+                <tr>
+                  <td className="px-6 py-10 text-center text-sm text-slate-500" colSpan="5">{normalizedQuery ? 'No quotation requests match your search.' : 'No quotation requests found.'}</td>
+                </tr>
+              )}
             </tbody>
           </table>
         </div>
@@ -132,7 +146,7 @@ function QuotationRequests() {
             <input className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm mb-4" type="number" min="0" step="0.01" placeholder="0.00" value={actionDraft.additionalCost} onChange={(event) => setActionDraft((current) => ({ ...current, additionalCost: event.target.value }))} />
 
             <label className="block text-xs font-bold text-slate-500 uppercase mb-2">Valid until</label>
-            <input className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm mb-4" type="date" value={actionDraft.validUntil} onChange={(event) => setActionDraft((current) => ({ ...current, validUntil: event.target.value }))} />
+            <input className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm mb-4" type="date" min={today()} value={actionDraft.validUntil} onChange={(event) => setActionDraft((current) => ({ ...current, validUntil: event.target.value }))} />
 
             <label className="block text-xs font-bold text-slate-500 uppercase mb-2">Staff remarks</label>
             <textarea className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm mb-4 min-h-24" value={actionDraft.remarks} onChange={(event) => setActionDraft((current) => ({ ...current, remarks: event.target.value }))} />

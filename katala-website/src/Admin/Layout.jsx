@@ -1,7 +1,13 @@
 
-import { useEffect, useRef, useState } from 'react';
-import { Bell, ClipboardList, Globe2, LayoutDashboard, LogOut, Package, Search, Settings, User, Users, UserCog, Wrench } from 'lucide-react';
+import { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { Bell, CircleX, ClipboardList, Globe2, LayoutDashboard, LogOut, Package, Search, Settings, User, Users, UserCog, Wrench } from 'lucide-react';
 import { authApi, getStoredSession } from '../services/katalaApi';
+
+const AdminSearchContext = createContext({ query: '', normalizedQuery: '', setQuery: () => {}, clearQuery: () => {} })
+
+export function useAdminSearch() {
+  return useContext(AdminSearchContext)
+}
 
 export const Sidebar = ({ activeTab, onNavigate }) => {
   const navItems = [
@@ -52,7 +58,9 @@ export const Sidebar = ({ activeTab, onNavigate }) => {
   );
 };
 
-export const TopBar = ({ title }) => (
+export const TopBar = ({ title }) => {
+  const { query, setQuery, clearQuery } = useAdminSearch()
+  return (
   <header className="h-16 bg-white border-b border-slate-200 flex items-center justify-between px-8 ml-[260px] sticky top-0 z-40">
     <div className="flex items-center gap-8 flex-1">
       <h2 className="text-[#b3000c] font-bold text-xl">{title}</h2>
@@ -61,8 +69,15 @@ export const TopBar = ({ title }) => (
         <input 
           type="text" 
           placeholder="Search..." 
-          className="w-full bg-slate-50 border border-slate-200 rounded-lg py-2 pl-10 pr-4 text-sm focus:outline-none focus:ring-2 focus:ring-[#b3000c]/20 transition-all"
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          className="w-full bg-slate-50 border border-slate-200 rounded-lg py-2 pl-10 pr-10 text-sm focus:outline-none focus:ring-2 focus:ring-[#b3000c]/20 transition-all"
         />
+        {query && (
+          <button type="button" className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700" onClick={clearQuery} aria-label="Clear admin search">
+            <CircleX className="w-4 h-4" />
+          </button>
+        )}
       </div>
     </div>
     <div className="flex items-center gap-4">
@@ -73,15 +88,25 @@ export const TopBar = ({ title }) => (
       <TopbarAccount />
     </div>
   </header>
-);
+  )
+};
 
 function Layout({ children, activeTab, title, onNavigate }) {
+  const [query, setQuery] = useState('')
+  const searchValue = useMemo(() => ({
+    query,
+    normalizedQuery: query.trim().replace(/\s+/g, ' ').toLowerCase(),
+    setQuery,
+    clearQuery: () => setQuery(''),
+  }), [query])
+
   useEffect(() => {
     const theme = localStorage.getItem('katala-admin-theme') || 'light'
     document.documentElement.classList.toggle('admin-theme-dark', theme === 'dark')
   }, [])
 
   return (
+    <AdminSearchContext.Provider value={searchValue}>
     <div className="min-h-screen bg-[#f8fafc] font-sans text-slate-900">
       <Sidebar activeTab={activeTab} onNavigate={onNavigate} />
       <TopBar title={title} />
@@ -91,6 +116,7 @@ function Layout({ children, activeTab, title, onNavigate }) {
         </div>
       </main>
     </div>
+    </AdminSearchContext.Provider>
   );
 }
 

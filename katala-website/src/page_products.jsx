@@ -68,8 +68,12 @@ function formatPeso(value) {
 }
 
 function displayQuotationStatus(status) {
-  if (status === 'Accepted') return 'Ready for Payment'
-  return status === 'Submitted' ? 'Under Review' : (status || 'Under Review')
+  const value = String(status || '').trim()
+  const normalized = value.toLowerCase()
+  if (normalized === 'accepted') return 'Ready for Payment'
+  if (normalized === 'ready for payment' || normalized === 'for payment') return 'Ready for Payment'
+  if (normalized === 'submitted') return 'Under Review'
+  return value || 'Under Review'
 }
 
 function normalizeKey(value) {
@@ -363,7 +367,7 @@ function ProductModal({ product, image, onClose, onAdd }) {
               )}
               <label>
                 Quantity
-                <input type="number" min="1" max="999" value={quantity} onChange={(e) => setQuantity(e.target.value)} />
+                <input type="number" min="1" max="999" step="1" value={quantity} onChange={(e) => setQuantity(e.target.value)} />
               </label>
             </div>
 
@@ -476,6 +480,7 @@ function AddToCartConfirmModal({ item, onChange, onCancel, onConfirm }) {
                 type="number"
                 min="1"
                 max="999"
+                step="1"
                 value={item.quantity}
                 onChange={(e) => updateQuantity(e.target.value)}
                 onBlur={() => {
@@ -630,6 +635,7 @@ function CartModal({ cart, setCart, onClose, onQuotationCreated, onManageQuotati
                       type="number"
                       min="1"
                       max="999"
+                      step="1"
                       value={line.quantity}
                       onChange={(e) => updateLine(index, { quantity: Math.min(999, Math.max(1, Number.parseInt(e.target.value, 10) || 1)) })}
                     />
@@ -656,10 +662,10 @@ function CartModal({ cart, setCart, onClose, onQuotationCreated, onManageQuotati
                 <p>Provide the project details Katala needs to review the requested products and prepare a quotation.</p>
               </div>
               <div className="form-grid">
-                <label>Project name<input maxLength="160" name="projectName" value={form.projectName} onChange={updateForm} /></label>
+                <label>Project name<input required maxLength="160" name="projectName" value={form.projectName} onChange={updateForm} /></label>
                 <label>Establishment / organization<input maxLength="160" name="establishmentName" value={form.establishmentName} onChange={updateForm} /></label>
-                <label className="wide">Project address<textarea maxLength="1000" rows="2" name="projectAddress" value={form.projectAddress} onChange={updateForm} /></label>
-                <label className="wide">Project description<textarea maxLength="2000" rows="3" name="projectDescription" value={form.projectDescription} onChange={updateForm} placeholder="Describe the intended use or project requirements." /></label>
+                <label className="wide">Project address<textarea required maxLength="1000" rows="2" name="projectAddress" value={form.projectAddress} onChange={updateForm} /></label>
+                <label className="wide">Project description<textarea required minLength="5" maxLength="2000" rows="3" name="projectDescription" value={form.projectDescription} onChange={updateForm} placeholder="Describe the intended use or project requirements." /></label>
                 <label className="wide">Customer remarks<textarea maxLength="2000" rows="3" name="customerRemarks" value={form.customerRemarks} onChange={updateForm} placeholder="Questions or additional notes for Katala." /></label>
               </div>
               {status.type !== 'idle' && (
@@ -783,6 +789,26 @@ function ManageQuotationModal({ quotationRefs, setQuotationRefs, initialPaymentR
     }
   }
 
+  async function refreshQuotation() {
+    if (!selectedReference) return
+    setStatus({ type: 'loading', message: 'Refreshing quotation...' })
+    try {
+      const data = await schemaApi.getQuotation(selectedReference)
+      const loaded = data.quotation
+      setQuotation(loaded)
+      setForm({
+        projectName: loaded.projectName || '',
+        establishmentName: loaded.establishmentName || '',
+        projectDescription: loaded.projectDescription || '',
+        projectAddress: loaded.projectAddress || '',
+        customerRemarks: loaded.customerRemarks || '',
+      })
+      setStatus({ type: 'success', message: 'Quotation refreshed.' })
+    } catch (error) {
+      setStatus({ type: 'error', message: error.message || 'Unable to refresh quotation.' })
+    }
+  }
+
   async function cancelQuotation() {
     if (!selectedReference || !window.confirm(`Cancel quotation request ${selectedReference}? This action will mark the request as cancelled.`)) return
     setStatus({ type: 'loading', message: 'Cancelling quotation…' })
@@ -857,6 +883,7 @@ function ManageQuotationModal({ quotationRefs, setQuotationRefs, initialPaymentR
 
                 <div className="form-actions manage-actions">
                   <button className="btn primary" disabled={!editable || status.type === 'loading'}>Update quotation</button>
+                  <button className="btn secondary" type="button" disabled={status.type === 'loading'} onClick={refreshQuotation}>Refresh quotation</button>
                   <button className="btn danger" type="button" disabled={status.type === 'loading' || quotation.status === 'Cancelled'} onClick={cancelQuotation}>Cancel quotation</button>
                 </div>
               </form>

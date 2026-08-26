@@ -13,7 +13,8 @@ export default function Profile() {
   const [quotePreview, setQuotePreview] = useState(null)
   const [quoteEdit, setQuoteEdit] = useState(null)
   const [paymentConfirm, setPaymentConfirm] = useState(null)
-  const [showCompleted, setShowCompleted] = useState(false)
+  const [quotationFilter, setQuotationFilter] = useState('All')
+  const [serviceFilter, setServiceFilter] = useState('All')
 
   useEffect(() => {
     if (!signedIn) return
@@ -44,6 +45,21 @@ export default function Profile() {
     }
   }, [signedIn])
 
+  async function refreshInbox(showStatus = false) {
+    if (showStatus) setStatus({ type: 'loading', message: 'Refreshing customer inbox...' })
+    try {
+      const data = await schemaApi.getCustomerInbox()
+      setInbox({
+        quotations: (data.quotations || []).map(withWorkflow),
+        serviceRequests: (data.serviceRequests || []).map(withWorkflow),
+      })
+      if (showStatus) setStatus({ type: 'success', message: 'Customer inbox refreshed.' })
+    } catch (error) {
+      if (showStatus) setStatus({ type: 'error', message: error.message || 'Unable to refresh customer inbox.' })
+      throw error
+    }
+  }
+
   function updateLocalReference(referenceNumber, patch) {
     const next = upsertWorkflow(referenceNumber, patch)
     setInbox((current) => ({
@@ -59,6 +75,19 @@ export default function Profile() {
         item.referenceNumber === quotation.referenceNumber ? withWorkflow({ ...item, ...quotation }) : item
       ),
     }))
+  }
+
+  async function cancelQuotation(item) {
+    if (!canCancelQuotation(item)) return
+    if (!window.confirm(`Cancel quotation request ${item.referenceNumber}?`)) return
+    setStatus({ type: 'loading', message: 'Cancelling quotation...' })
+    try {
+      await schemaApi.cancelQuotation(item.referenceNumber)
+      await refreshInbox()
+      setStatus({ type: 'success', message: 'Quotation request cancelled.' })
+    } catch (error) {
+      setStatus({ type: 'error', message: error.message || 'Unable to cancel quotation.' })
+    }
   }
 
   function confirmQuotation(item) {
@@ -88,13 +117,8 @@ export default function Profile() {
     return null
   }
 
-  const activeQuotations = inbox.quotations.filter((item) => !isCompleted(item))
-  const assignedQuotations = activeQuotations.filter(hasSchedule)
-  const ongoingQuotations = activeQuotations.filter((item) => !hasSchedule(item))
-  const completedQuotations = inbox.quotations.filter(isCompleted)
-  const activeServiceRequests = inbox.serviceRequests.filter((item) => !isCompleted(item))
-  const completedServiceRequests = inbox.serviceRequests.filter(isCompleted)
-  const completedCount = completedQuotations.length + completedServiceRequests.length
+  const filteredQuotations = filterCustomerItems(inbox.quotations, quotationFilter)
+  const filteredServiceRequests = filterCustomerItems(inbox.serviceRequests, serviceFilter)
 
   return (
     <>
@@ -138,50 +162,39 @@ export default function Profile() {
             {status.type !== 'idle' && <div className={`form-status ${status.type}`}>{status.message}</div>}
 
             <div className="inbox-grid">
-              <InboxColumn title="Quotations">
-                <InboxGroup title="Ongoing">
-                  {ongoingQuotations.map((quote) => (
-                    <InboxCard key={quote.referenceNumber} item={quote} title={quote.projectName || quote.establishmentName || 'Product quotation'} onView={setQuotePreview} onEdit={setQuoteEdit} onConfirm={confirmQuotation} onPay={setPaymentConfirm} onReceipt={setReceipt} />
+              <InboxColumn title="Quotations" action={<button className="btn secondary compact-btn" type="button" onClick={() => refreshInbox(true).catch(() => {})}>Refresh</button>}>
+                <QuotationFilterPills active={quotationFilter} onChange={setQuotationFilter} />
+                <div className="profile-quotation-list">
+                  {filteredQuotations.map((quote) => (
+                    <InboxCard
+                      key={quote.referenceNumber}
+                      item={quote}
+                      title={quote.projectName || quote.establishmentName || 'Product quotation'}
+                      onView={setQuotePreview}
+                      onEdit={setQuoteEdit}
+                      onConfirm={confirmQuotation}
+                      onPay={setPaymentConfirm}
+                      onReceipt={setReceipt}
+                      onCancel={cancelQuotation}
+                    />
                   ))}
-                  {!ongoingQuotations.length && <p className="muted">No ongoing quotation updates.</p>}
-                </InboxGroup>
-
-                <InboxGroup title="Staff assigned">
-                  {assignedQuotations.map((quote) => (
-                    <InboxCard key={quote.referenceNumber} item={quote} title={quote.projectName || quote.establishmentName || 'Product quotation'} onView={setQuotePreview} onEdit={setQuoteEdit} onConfirm={confirmQuotation} onPay={setPaymentConfirm} onReceipt={setReceipt} />
-                  ))}
-                  {!assignedQuotations.length && <p className="muted">No staff-assigned quotations yet.</p>}
-                </InboxGroup>
+                  {!filteredQuotations.length && <p className="muted">No quotations in this category.</p>}
+                </div>
               </InboxColumn>
 
-              <InboxColumn title="Service Requests">
-                {activeServiceRequests.map((request) => (
-                  <InboxCard key={request.referenceNumber} item={request} title={request.serviceName} isService onView={setQuotePreview} onEdit={setQuoteEdit} onConfirm={confirmQuotation} onPay={setPaymentConfirm} onReceipt={setReceipt} />
-                ))}
-                {!activeServiceRequests.length && <p className="muted">No ongoing service updates.</p>}
+              <InboxColumn title="Service Requests" action={<button className="btn secondary compact-btn" type="button" onClick={() => refreshInbox(true).catch(() => {})}>Refresh</button>}>
+                <ProfileFilterPills filters={profileFilters} active={serviceFilter} onChange={setServiceFilter} label="Filter service requests" />
+                <div className="profile-quotation-list">
+                  {filteredServiceRequests.map((request) => (
+                    <InboxCard key={request.referenceNumber} item={request} title={request.serviceName} isService onView={setQuotePreview} onEdit={setQuoteEdit} onConfirm={confirmQuotation} onPay={setPaymentConfirm} onReceipt={setReceipt} />
+                  ))}
+                  {!filteredServiceRequests.length && <p className="muted">No service requests in this category.</p>}
+                </div>
               </InboxColumn>
             </div>
-
-            {completedCount > 0 && (
-              <div className="profile-completed-toggle">
-                <button className="btn secondary" type="button" onClick={() => setShowCompleted(true)}>
-                  View all completed quotations and services ({completedCount})
-                </button>
-              </div>
-            )}
           </div>
         </section>
       </main>
-      {showCompleted && (
-        <CompletedInboxDialog
-          quotations={completedQuotations}
-          services={completedServiceRequests}
-          onClose={() => setShowCompleted(false)}
-                onView={setQuotePreview}
-                onEdit={setQuoteEdit}
-                onReceipt={setReceipt}
-        />
-      )}
       {quotePreview && <QuotationDialog item={quotePreview} onClose={() => setQuotePreview(null)} />}
       {quoteEdit && <EditQuotationDialog item={quoteEdit} onSaved={updateQuotationInInbox} onClose={() => setQuoteEdit(null)} />}
       {paymentConfirm && <PaymentDialog item={paymentConfirm} onPay={payQuotation} onClose={() => setPaymentConfirm(null)} />}
@@ -191,25 +204,37 @@ export default function Profile() {
   )
 }
 
-function InboxColumn({ title, children }) {
+function InboxColumn({ title, children, action = null }) {
   return (
     <div className="inbox-column">
-      <h3>{title}</h3>
+      <div className="profile-column-heading">
+        <h3>{title}</h3>
+        {action}
+      </div>
       <div className="inbox-list">{children}</div>
     </div>
   )
 }
 
-function InboxGroup({ title, children }) {
+function QuotationFilterPills({ active, onChange }) {
+  return <ProfileFilterPills filters={profileFilters} active={active} onChange={onChange} label="Filter quotations" />
+}
+
+const profileFilters = ['All', 'Under Review', 'Ongoing', 'Cancelled', 'Complete']
+
+function ProfileFilterPills({ filters, active, onChange, label }) {
   return (
-    <section className="inbox-group">
-      <h4>{title}</h4>
-      <div className="inbox-group-list">{children}</div>
-    </section>
+    <div className="profile-filter-pills" role="group" aria-label={label}>
+      {filters.map((filter) => (
+        <button key={filter} type="button" className={active === filter ? 'active' : ''} onClick={() => onChange(filter)}>
+          {filter}
+        </button>
+      ))}
+    </div>
   )
 }
 
-function InboxCard({ item, title, isService = false, onView, onEdit, onConfirm, onPay, onReceipt }) {
+function InboxCard({ item, title, isService = false, onView, onEdit, onConfirm, onPay, onReceipt, onCancel = null }) {
   return (
     <article className="inbox-card">
       <div>
@@ -218,47 +243,16 @@ function InboxCard({ item, title, isService = false, onView, onEdit, onConfirm, 
       </div>
       <p>Status: <b>{item.status}</b></p>
       {item.recurrenceFrequency && item.recurrenceFrequency !== 'One-time' && <p>Frequency: <b>{item.recurrenceFrequency}</b></p>}
+      {hasFinalSchedule(item) && (
+        <p className="profile-schedule-alert"><b>!</b> Schedule finalized: {formatSchedule(item.schedule?.date, item.schedule?.time)} / {assignedStaff(item)}</p>
+      )}
       {hasSchedule(item) && <p>{scheduleLabel(item)}: <b>{formatSchedule(item.schedule?.date || item.preferredDate, item.schedule?.time || item.preferredTime)}</b></p>}
       {assignedStaff(item) && <p>Assigned staff: <b>{assignedStaff(item)}</b></p>}
       <p>Total: <b>{formatPeso(item.quotation?.total || item.totalAmount)}</b></p>
       <p>{statusMessage(item)}</p>
       {item.payment?.status && <p>Payment: <b>{item.payment.status}</b></p>}
-      <CustomerActions item={item} isService={isService} onView={onView} onEdit={onEdit} onConfirm={onConfirm} onPay={onPay} onReceipt={onReceipt} />
+      <CustomerActions item={item} isService={isService} onView={onView} onEdit={onEdit} onConfirm={onConfirm} onPay={onPay} onReceipt={onReceipt} onCancel={onCancel} />
     </article>
-  )
-}
-
-function CompletedInboxDialog({ quotations, services, onClose, onView, onEdit, onReceipt }) {
-  return (
-    <div className="modal-backdrop receipt-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
-      <section className="product-modal profile-detail-modal" role="dialog" aria-modal="true" aria-labelledby="completed-inbox-title">
-        <button className="modal-close" type="button" onClick={onClose} aria-label="Close">x</button>
-        <div className="receipt-panel">
-          <div className="receipt-heading">
-            <div>
-              <span className="eyebrow">COMPLETED</span>
-              <h2 id="completed-inbox-title">Completed quotations and services</h2>
-              <p className="muted">Closed items are grouped here to keep your active inbox clean.</p>
-            </div>
-          </div>
-          <div className="completed-inbox-list">
-            {[...quotations, ...services].map((item) => (
-              <InboxCard
-                key={item.referenceNumber}
-                item={item}
-                title={item.serviceName || item.projectName || item.establishmentName || 'Katala service'}
-                isService={Boolean(item.serviceName)}
-                onView={onView}
-                onEdit={onEdit}
-                onConfirm={() => {}}
-                onPay={() => {}}
-                onReceipt={onReceipt}
-              />
-            ))}
-          </div>
-        </div>
-      </section>
-    </div>
   )
 }
 
@@ -266,6 +260,8 @@ function QuotationBreakdown({ item }) {
   const quotation = item.quotation || normalizeQuotation({}, item)
   return (
     <div className="profile-quote-box">
+      <p><b>Project:</b> {quotationTitle(item)}</p>
+      {item.establishmentName && <p><b>Establishment:</b> {item.establishmentName}</p>}
       <p><b>Quotation date:</b> {quotation.quotationDate || 'Not assigned'}</p>
       {quotation.charges?.map((charge) => (
         <p key={charge.id}>{charge.description || charge.type}: <b>{charge.quantity} x {formatPeso(charge.unitPrice)} = {formatPeso(charge.subtotal)}</b></p>
@@ -279,7 +275,7 @@ function QuotationBreakdown({ item }) {
   )
 }
 
-function CustomerActions({ item, isService = false, onView, onEdit, onConfirm, onPay, onReceipt }) {
+function CustomerActions({ item, isService = false, onView, onEdit, onConfirm, onPay, onReceipt, onCancel = null }) {
   const receipt = item.receipt || (item.payment?.receiptNumber ? buildReceipt(item, item.payment) : null)
   const paid = isPaid(item)
   return (
@@ -296,6 +292,9 @@ function CustomerActions({ item, isService = false, onView, onEdit, onConfirm, o
       )}
       {paid && receipt && (
         <button className="btn secondary profile-action" type="button" onClick={() => onReceipt(item.receipt || receipt)}>View receipt</button>
+      )}
+      {!isService && canCancelQuotation(item) && onCancel && (
+        <button className="btn danger profile-action" type="button" onClick={() => onCancel(item)}>Cancel quotation</button>
       )}
     </div>
   )
@@ -370,6 +369,30 @@ function isCompleted(item) {
   return item.status === 'Completed'
 }
 
+function isCancelled(item) {
+  return item.status === 'Cancelled'
+}
+
+function isUnderReview(item) {
+  return ['Submitted', 'Under Review', 'Quotation Draft'].includes(item.status)
+}
+
+function isOngoing(item) {
+  return !isUnderReview(item) && !isCancelled(item) && !isCompleted(item)
+}
+
+function filterCustomerItems(items, filter) {
+  if (filter === 'Under Review') return items.filter(isUnderReview)
+  if (filter === 'Ongoing') return items.filter(isOngoing)
+  if (filter === 'Cancelled') return items.filter(isCancelled)
+  if (filter === 'Complete') return items.filter(isCompleted)
+  return items
+}
+
+function canCancelQuotation(item) {
+  return ['Submitted', 'Under Review'].includes(item.status)
+}
+
 function statusMessage(item) {
   if (isCompleted(item)) return 'This item is completed.'
   if (hasAssignedSchedule(item)) return 'Your service schedule has been assigned.'
@@ -412,6 +435,7 @@ function QuotationDialog({ item, onClose }) {
 }
 
 function PaymentDialog({ item, onPay, onClose }) {
+  const title = quotationTitle(item)
   return (
     <div className="modal-backdrop receipt-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
       <section className="product-modal profile-payment-modal" role="dialog" aria-modal="true" aria-labelledby="profile-payment-title">
@@ -420,13 +444,15 @@ function PaymentDialog({ item, onPay, onClose }) {
           <div className="receipt-heading">
             <div>
               <span className="eyebrow">PAYMENT CONFIRMATION</span>
-              <h2 id="profile-payment-title">Confirm mock payment</h2>
+              <h2 id="profile-payment-title">{title}</h2>
               <p className="muted">Quotation {item.referenceNumber}</p>
             </div>
             <strong>{formatPeso(item.quotation?.total)}</strong>
           </div>
           <QuotationBreakdown item={item} />
           <div className="receipt-meta">
+            <div><span>Project name</span><strong>{title}</strong></div>
+            <div><span>Establishment</span><strong>{item.establishmentName || 'Not provided'}</strong></div>
             <div><span>{scheduleLabel(item)}</span><strong>{formatSchedule(item.schedule?.date || item.preferredDate, item.schedule?.time || item.preferredTime)}</strong></div>
             <div><span>Assigned staff</span><strong>{assignedStaff(item) || 'To be assigned'}</strong></div>
           </div>
@@ -496,7 +522,10 @@ function withWorkflow(item) {
     ...base,
     ...workflow,
     referenceNumber,
-    status: displayStatus(workflow.status || item.status),
+    projectName: item.projectName || workflow.projectName || '',
+    establishmentName: item.establishmentName || workflow.establishmentName || '',
+    subject: item.serviceName || item.projectName || item.establishmentName || workflow.subject || 'Katala service',
+    status: mergedStatus(workflow.status, item.status),
     quotation: normalizeQuotation(workflow.quotation, { ...base, totalAmount: item.totalAmount }),
     payment: workflow.payment || item.payment,
     receipt: workflow.receipt,
@@ -521,6 +550,10 @@ function hasSchedule(item) {
   return Boolean(item.schedule?.date || item.schedule?.time || item.preferredDate || item.preferredTime)
 }
 
+function hasFinalSchedule(item) {
+  return !isCompleted(item) && Boolean(item.schedule?.date && item.schedule?.time && assignedStaff(item))
+}
+
 function hasAssignedSchedule(item) {
   return Boolean(assignedStaff(item) && (item.schedule?.date || item.schedule?.time))
 }
@@ -533,7 +566,36 @@ function assignedStaff(item) {
   return item.schedule?.staff || item.staff || ''
 }
 
+function quotationTitle(item) {
+  return item.projectName || item.establishmentName || item.subject || 'Product quotation'
+}
+
 function displayStatus(status) {
-  if (status === 'Accepted') return 'Ready for Payment'
-  return status === 'Submitted' ? 'Under Review' : (status || 'Under Review')
+  const value = String(status || '').trim()
+  const normalized = value.toLowerCase()
+  if (normalized === 'accepted') return 'Ready for Payment'
+  if (normalized === 'ready for payment' || normalized === 'for payment') return 'Ready for Payment'
+  if (normalized === 'submitted') return 'Under Review'
+  return value || 'Under Review'
+}
+
+function mergedStatus(localStatus, backendStatus) {
+  const local = displayStatus(localStatus)
+  const backend = displayStatus(backendStatus)
+  return statusRank(local) > statusRank(backend) ? local : backend
+}
+
+function statusRank(status) {
+  return {
+    Submitted: 1,
+    'Under Review': 2,
+    'Quotation Draft': 3,
+    'Ready for Payment': 4,
+    'Customer Confirmed': 5,
+    Paid: 6,
+    Scheduled: 7,
+    'In Progress': 8,
+    Completed: 9,
+    Cancelled: 10,
+  }[status] || 0
 }

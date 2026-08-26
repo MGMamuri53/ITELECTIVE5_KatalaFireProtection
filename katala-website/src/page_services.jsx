@@ -194,6 +194,18 @@ function ServiceRequestModal({ service, onClose }) {
       setStatus({ type: 'error', message: scheduleError, referenceNumber: '' })
       return
     }
+    if (!form.contactPerson.trim()) {
+      setStatus({ type: 'error', message: 'Contact person is required.', referenceNumber: '' })
+      return
+    }
+    if (!/^[+()\d\s.-]{7,30}$/.test(form.contactNumber.trim())) {
+      setStatus({ type: 'error', message: 'Enter a valid contact number.', referenceNumber: '' })
+      return
+    }
+    if (!form.projectAddress.trim()) {
+      setStatus({ type: 'error', message: 'Service address is required.', referenceNumber: '' })
+      return
+    }
 
     setStatus({ type: 'loading', message: 'Sending service request…', referenceNumber: '' })
 
@@ -232,9 +244,10 @@ function ServiceRequestModal({ service, onClose }) {
               <div className="form-grid">
                 <label>Project name<input maxLength="160" name="projectName" value={form.projectName} onChange={update} /></label>
                 <label>Establishment / organization<input maxLength="160" name="establishmentName" value={form.establishmentName} onChange={update} /></label>
-                <label>Contact person<input maxLength="160" name="contactPerson" value={form.contactPerson} onChange={update} /></label>
+                <label>Contact person<input required maxLength="160" name="contactPerson" value={form.contactPerson} onChange={update} /></label>
+                <label>Contact number<input required maxLength="60" name="contactNumber" value={form.contactNumber} onChange={update} /></label>
                 <label className="wide">Service requirement / problem description<textarea required minLength="5" maxLength="2500" rows="4" name="problemDescription" value={form.problemDescription} onChange={update} placeholder="Describe the equipment, issue, requested work, or site concern." /></label>
-                <label className="wide">Project address<textarea maxLength="1000" rows="2" name="projectAddress" value={form.projectAddress} onChange={update} /></label>
+                <label className="wide">Project address<textarea required maxLength="1000" rows="2" name="projectAddress" value={form.projectAddress} onChange={update} /></label>
                 <label>
                   Preferred date
                   <input

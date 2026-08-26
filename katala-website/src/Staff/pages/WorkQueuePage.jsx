@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
 import { CalendarClock, Eye, Plus, Save, Trash2 } from 'lucide-react';
 import { PageHeading, RefreshTableButton, StatusBadge } from '../StaffShared';
+import { useStaffSearch } from '../StaffLayout';
 import { schemaApi } from '../../services/katalaApi';
 import {
   chargeTypes,
+  filterStaffItems,
   normalizeCharge,
   normalizeQuotation,
   overlayWorkflow,
@@ -20,6 +22,7 @@ function WorkQueuePage() {
   const [queue, setQueue] = useState([]);
   const [activeRequest, setActiveRequest] = useState(null);
   const [status, setStatus] = useState({ type: 'loading', message: 'Loading customer requests...' });
+  const { normalizedQuery } = useStaffSearch();
 
   useEffect(() => {
     loadQueue();
@@ -64,6 +67,8 @@ function WorkQueuePage() {
     }
   }
 
+  const shown = filterStaffItems(queue, normalizedQuery);
+
   return (
     <>
       <PageHeading
@@ -72,7 +77,7 @@ function WorkQueuePage() {
         actions={<RefreshTableButton onClick={() => loadQueue()} loading={status.type === 'loading'} />}
       />
       {status.type !== 'idle' && <Notice status={status} />}
-      <RequestTable items={queue} onViewDetails={setActiveRequest} />
+      <RequestTable items={shown} query={normalizedQuery} onViewDetails={setActiveRequest} />
       {activeRequest && (
         <RequestModal
           item={activeRequest}
@@ -84,7 +89,7 @@ function WorkQueuePage() {
   );
 }
 
-function RequestTable({ items, onViewDetails }) {
+function RequestTable({ items, query, onViewDetails }) {
   return (
     <section className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
       <div className="hidden md:grid grid-cols-[1fr_1.25fr_1.5fr_1fr_auto] gap-4 px-6 py-4 bg-slate-50/50 text-xs font-bold text-slate-500 uppercase">
@@ -102,7 +107,7 @@ function RequestTable({ items, onViewDetails }) {
             </button>
           </div>
         ))}
-        {!items.length && <div className="px-6 py-10 text-sm text-slate-500">No requests are waiting for quotation review.</div>}
+        {!items.length && <div className="px-6 py-10 text-sm text-slate-500">{query ? 'No customer requests match your search.' : 'No requests are waiting for quotation review.'}</div>}
       </div>
     </section>
   );
@@ -207,8 +212,12 @@ function QuotationPanel({ item, onUpdate }) {
 
   function validate() {
     if (!draft.quotationDate) return 'Quotation date is required.';
+    if (draft.quotationDate < today()) return 'Quotation date cannot be in the past.';
+    if (draft.validUntil && draft.validUntil < today()) return 'Quotation validity date cannot be in the past.';
     if (!draft.charges.length) return 'Add at least one charge item.';
     if (draft.charges.some((charge) => !charge.description.trim())) return 'Each charge item needs a description.';
+    if (draft.charges.some((charge) => !Number.isInteger(Number(charge.quantity)) || Number(charge.quantity) < 1)) return 'Quantities must be whole numbers greater than zero.';
+    if (draft.charges.some((charge) => Number(charge.unitPrice) < 0)) return 'Prices must be non-negative numbers.';
     if (totals.total <= 0) return 'Final total must be greater than zero before customer payment.';
     if (!scheduleDraft.date || !scheduleDraft.time) return 'Add the proposed service date and time before customer payment.';
     return '';
@@ -239,7 +248,7 @@ function QuotationPanel({ item, onUpdate }) {
         <p className="text-sm text-slate-500">Edit charges here, save as draft, or mark ready for customer payment.</p>
       </div>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-        <Field label="Quotation date"><input type="date" value={draft.quotationDate} onChange={(e) => setDraft({ ...draft, quotationDate: e.target.value })} /></Field>
+        <Field label="Quotation date"><input type="date" min={today()} value={draft.quotationDate} onChange={(e) => setDraft({ ...draft, quotationDate: e.target.value })} /></Field>
         <Field label="Valid until"><input type="date" value={draft.validUntil} min={today()} onChange={(e) => setDraft({ ...draft, validUntil: e.target.value })} /></Field>
       </div>
 
@@ -267,7 +276,7 @@ function QuotationPanel({ item, onUpdate }) {
             )}
             <Field label="Description"><input value={charge.description} onChange={(e) => updateCharge(charge.id, { description: e.target.value })} /></Field>
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-              <Field label="Qty"><input type="number" min="0" step="0.01" value={charge.quantity} onChange={(e) => updateCharge(charge.id, { quantity: e.target.value })} /></Field>
+              <Field label="Qty"><input type="number" min="1" step="1" value={charge.quantity} onChange={(e) => updateCharge(charge.id, { quantity: e.target.value })} /></Field>
               <Field label="Unit price"><input type="number" min="0" step="0.01" value={charge.unitPrice} onChange={(e) => updateCharge(charge.id, { unitPrice: e.target.value })} /></Field>
               <div className="grid gap-1">
                 <span className="text-[10px] font-bold text-slate-400 uppercase">Subtotal</span>
@@ -293,7 +302,7 @@ function QuotationPanel({ item, onUpdate }) {
         </div>
         <p className="text-sm text-slate-500">This schedule will be shown to the customer before they confirm and pay.</p>
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-          <Field label="Schedule date"><input type="date" value={scheduleDraft.date} onChange={(e) => setScheduleDraft({ ...scheduleDraft, date: e.target.value })} /></Field>
+          <Field label="Schedule date"><input type="date" min={today()} value={scheduleDraft.date} onChange={(e) => setScheduleDraft({ ...scheduleDraft, date: e.target.value })} /></Field>
           <Field label="Schedule time"><input type="time" value={scheduleDraft.time} onChange={(e) => setScheduleDraft({ ...scheduleDraft, time: e.target.value })} /></Field>
           <Field label="Responsible staff">
             <select value={scheduleDraft.staff} onChange={(e) => setScheduleDraft({ ...scheduleDraft, staff: e.target.value })}>

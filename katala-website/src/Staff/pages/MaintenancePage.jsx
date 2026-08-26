@@ -1,12 +1,14 @@
 import { useEffect, useState } from 'react';
 import { CheckCircle2, CalendarClock } from 'lucide-react';
 import { PageHeading, RefreshTableButton, SummaryCard } from '../StaffShared';
+import { useStaffSearch } from '../StaffLayout';
 import { schemaApi } from '../../services/katalaApi';
-import { isRecurringService, recurrenceOptions, staffMembers, upsertWorkflow, workflowItemsFromQueue } from '../staffWorkflow';
+import { completeRecurringVisit, filterStaffItems, isRecurringService, recurrenceOptions, staffMembers, today, upsertWorkflow, workflowItemsFromQueue } from '../staffWorkflow';
 
 function MaintenancePage() {
   const [items, setItems] = useState([]);
   const [status, setStatus] = useState({ type: 'loading', message: 'Loading maintenance records...' });
+  const { normalizedQuery } = useStaffSearch();
 
   useEffect(() => {
     load();
@@ -31,32 +33,36 @@ function MaintenancePage() {
   }
 
   async function update(item, patch) {
+    if (patch.schedule?.date && patch.schedule.date < today()) {
+      setStatus({ type: 'error', message: 'Maintenance date cannot be in the past.' });
+      return;
+    }
     if (patch.maintenanceClosed && !window.confirm(`End maintenance plan ${item.id}? This will move the recurring record to Completed Work.`)) return;
     if (!patch.maintenanceClosed && patch.status === 'Completed' && !window.confirm(`Complete this maintenance visit for ${item.id}? The recurring maintenance record will remain active.`)) return;
-    const visits = patch.status === 'Completed'
-      ? [...(item.visits || []), { completedAt: new Date().toISOString(), schedule: patch.schedule || item.schedule, staff: patch.schedule?.staff || item.schedule?.staff || '' }]
-      : item.visits;
+    const workflowPatch = completeRecurringVisit(item, patch);
+    const visits = workflowPatch.visits || item.visits;
     upsertWorkflow(item.id, {
-      ...patch,
-      status: patch.maintenanceClosed ? 'Completed' : patch.status,
+      ...workflowPatch,
+      status: patch.maintenanceClosed ? 'Completed' : (workflowPatch.status || patch.status),
       serviceType: 'Recurring',
       visits,
       maintenanceEndedAt: patch.maintenanceClosed ? new Date().toISOString() : item.maintenanceEndedAt,
     });
     if (item.kind !== 'Quotation') {
       await schemaApi.updateStaffServiceRequest(item.id, {
-        status: patch.status || item.status,
-        preferredDate: patch.schedule?.date || item.schedule?.date || '',
-        preferredTime: patch.schedule?.time || item.schedule?.time || '',
-        recurrenceFrequency: patch.recurrenceFrequency || item.recurrenceFrequency || 'Monthly',
+        status: workflowPatch.status || patch.status || item.status,
+        preferredDate: workflowPatch.schedule?.date || patch.schedule?.date || item.schedule?.date || '',
+        preferredTime: workflowPatch.schedule?.time || patch.schedule?.time || item.schedule?.time || '',
+        recurrenceFrequency: workflowPatch.recurrenceFrequency || patch.recurrenceFrequency || item.recurrenceFrequency || 'Monthly',
         remarks: 'Updated from Staff maintenance',
-      }).catch(() => {});
+      });
     }
     load(false);
   }
 
-  const scheduled = items.filter((item) => item.status === 'Scheduled').length;
-  const completedVisits = items.reduce((sum, item) => sum + (item.visits?.length || (item.status === 'Completed' ? 1 : 0)), 0);
+  const shown = filterStaffItems(items, normalizedQuery);
+  const scheduled = shown.filter((item) => item.status === 'Scheduled').length;
+  const completedVisits = shown.reduce((sum, item) => sum + (item.visits?.length || (item.status === 'Completed' ? 1 : 0)), 0);
 
   return (
     <>
@@ -75,8 +81,8 @@ function MaintenancePage() {
           <span>Plan ID</span><span>Customer</span><span>Scope</span><span>Schedule</span><span>Staff</span><span>Frequency</span><span>Action</span>
         </div>
         <div className="divide-y divide-slate-100">
-          {items.map((item) => <MaintenanceRow key={item.id} item={item} onUpdate={update} />)}
-          {!items.length && status.type === 'idle' && <div className="px-6 py-10 text-sm text-slate-500">No scheduled recurring maintenance requests yet.</div>}
+          {shown.map((item) => <MaintenanceRow key={item.id} item={item} onUpdate={update} />)}
+          {!shown.length && status.type === 'idle' && <div className="px-6 py-10 text-sm text-slate-500">{normalizedQuery ? 'No maintenance records match your search.' : 'No scheduled recurring maintenance requests yet.'}</div>}
         </div>
       </section>
     </>
@@ -106,7 +112,7 @@ function MaintenanceRow({ item, onUpdate }) {
       <span className="text-sm font-medium text-slate-900">{item.customer}</span>
       <span className="text-sm text-slate-600">{item.subject}<br /><small className="text-slate-500">{draft.recurrenceFrequency}</small></span>
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-2 min-w-0">
-        <input className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm" type="date" value={draft.date} onChange={(e) => setDraft({ ...draft, date: e.target.value })} />
+        <input className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm" type="date" min={today()} value={draft.date} onChange={(e) => setDraft({ ...draft, date: e.target.value })} />
         <input className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm" type="time" value={draft.time} onChange={(e) => setDraft({ ...draft, time: e.target.value })} />
       </div>
       <select className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm" value={draft.staff} onChange={(e) => setDraft({ ...draft, staff: e.target.value })}>
@@ -120,7 +126,7 @@ function MaintenanceRow({ item, onUpdate }) {
         <button type="button" className="inline-flex items-center gap-2 rounded-lg bg-[#b3000c] text-white px-3 py-2 text-sm font-bold disabled:opacity-50" disabled={!draft.date || !draft.time} onClick={() => onUpdate(item, { status: 'Scheduled', schedule: draft, recurrenceFrequency: draft.recurrenceFrequency })}>
           <CalendarClock className="w-4 h-4" /> Update schedule
         </button>
-        <button type="button" className="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-sm font-bold text-slate-700 disabled:opacity-50" disabled={!draft.date || !draft.time} onClick={() => onUpdate(item, { status: 'Completed', schedule: draft, recurrenceFrequency: draft.recurrenceFrequency })}>
+        <button type="button" className="inline-flex items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm font-bold text-emerald-700 hover:bg-emerald-100 disabled:opacity-50" disabled={!draft.date || !draft.time} onClick={() => onUpdate(item, { status: 'Completed', schedule: draft, recurrenceFrequency: draft.recurrenceFrequency })}>
           <CheckCircle2 className="w-4 h-4" /> Visit done
         </button>
         <button type="button" className="inline-flex items-center gap-2 rounded-lg border border-red-200 px-3 py-2 text-sm font-bold text-[#b3000c]" onClick={() => onUpdate(item, { status: 'Completed', schedule: draft, recurrenceFrequency: draft.recurrenceFrequency, maintenanceClosed: true })}>

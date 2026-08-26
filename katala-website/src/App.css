@@ -642,10 +642,15 @@ img { max-width: 100%; }
 .profile-panel strong { color: var(--navy); font-size: 1rem; overflow-wrap: anywhere; }
 .inbox-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 22px; }
 .inbox-column { background: #fff; border: 1px solid var(--line); border-radius: 14px; overflow: hidden; box-shadow: 0 8px 25px rgba(18,35,75,.05); }
-.inbox-column h3 { margin: 0; padding: 18px 20px; color: var(--navy); border-bottom: 1px solid var(--line); }
-.inbox-list { display: grid; gap: 12px; padding: 18px; }
-.inbox-group { display: grid; gap: 10px; }
-.inbox-group + .inbox-group { margin-top: 8px; padding-top: 16px; border-top: 1px solid var(--line); }
+.profile-column-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 20px; border-bottom: 1px solid var(--line); }
+.profile-column-heading h3 { margin: 0; color: var(--navy); }
+.inbox-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); align-items: start; gap: 14px; padding: 18px; }
+.profile-filter-pills { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 2px; }
+.profile-filter-pills button { border: 1px solid #d4dae5; background: #fff; color: #526079; padding: 10px 15px; min-height: 40px; border-radius: 999px; cursor: pointer; font-weight: 800; font-size: .84rem; }
+.profile-filter-pills button:hover, .profile-filter-pills button.active { background: var(--navy); color: #fff; border-color: var(--navy); }
+.profile-quotation-list { grid-column: 1 / -1; display: grid; gap: 12px; }
+.inbox-group { display: grid; gap: 10px; min-width: 0; border: 1px solid var(--line); border-radius: 12px; padding: 12px; background: #fff; }
+.inbox-group + .inbox-group { margin-top: 0; padding-top: 12px; border-top: 1px solid var(--line); }
 .inbox-group h4 { margin: 0; color: var(--navy); font-size: .82rem; text-transform: uppercase; letter-spacing: .08em; }
 .inbox-group-list { display: grid; gap: 12px; }
 .inbox-card { border: 1px solid var(--line); border-radius: 10px; padding: 15px; background: #f9fafc; }
@@ -654,6 +659,8 @@ img { max-width: 100%; }
 .inbox-card span, .inbox-card p { color: var(--muted); font-size: .86rem; line-height: 1.5; }
 .inbox-card p { margin: 5px 0; }
 .inbox-card b { color: var(--navy); }
+.profile-schedule-alert { display: flex; align-items: center; gap: 7px; color: #8a5a00 !important; font-weight: 800; }
+.profile-schedule-alert b { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 999px; background: #fff7db; color: #9a6700 !important; border: 1px solid #f2d184; font-size: .78rem; line-height: 1; flex: 0 0 auto; }
 .profile-quote-box {
   display: grid;
   gap: 3px;
