@@ -48,7 +48,7 @@ function currentRoute() {
     .replace(/^\/+/, '')
     .trim()
     .toLowerCase()
-  return routes[route] ? route : 'signup'
+  return routes[route] ? route : 'home'
 }
 
 export default function App() {
@@ -56,7 +56,7 @@ export default function App() {
   const [authReady, setAuthReady] = useState(isAuthReady)
 
   useEffect(() => {
-    if (!location.hash) history.replaceState(null, '', '#signup')
+    if (!location.hash) history.replaceState(null, '', '#home')
 
     const syncRoute = () => {
       setPage(currentRoute())

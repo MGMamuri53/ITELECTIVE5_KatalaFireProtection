@@ -2,8 +2,9 @@ import { createClient } from '@supabase/supabase-js'
 
 const supabaseUrl = (import.meta.env.VITE_SUPABASE_URL || '').trim()
 const supabasePublishableKey = (import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY || '').trim()
+export const isSupabaseConfigured = Boolean(supabaseUrl && supabasePublishableKey)
 
-if (!supabaseUrl || !supabasePublishableKey) {
+if (!isSupabaseConfigured) {
   console.warn('Supabase Auth is not configured. Set VITE_SUPABASE_URL and VITE_SUPABASE_PUBLISHABLE_KEY.')
 }
 
@@ -24,15 +25,34 @@ function clearLegacyPersistedAuth() {
 
 clearLegacyPersistedAuth()
 
-export const supabase = createClient(supabaseUrl, supabasePublishableKey, {
-  auth: {
-    // Do not save access/refresh tokens to localStorage.
-    persistSession: false,
-
-    // Keep an active in-memory session refreshed while this page is open.
-    autoRefreshToken: true,
-
-    // Keep support for Supabase email-confirmation callbacks.
-    detectSessionInUrl: true,
-  },
+const configurationError = () => ({
+  data: { session: null, user: null },
+  error: new Error('Authentication is not configured. Add the Supabase environment variables to use account features.'),
 })
+
+const unavailableAuth = {
+  getSession: async () => ({ data: { session: null }, error: null }),
+  onAuthStateChange: () => ({
+    data: { subscription: { unsubscribe() {} } },
+  }),
+  signUp: async () => configurationError(),
+  signInWithPassword: async () => configurationError(),
+  signOut: async () => ({ error: null }),
+  updateUser: async () => configurationError(),
+  resend: async () => configurationError(),
+}
+
+export const supabase = isSupabaseConfigured
+  ? createClient(supabaseUrl, supabasePublishableKey, {
+      auth: {
+        // Do not save access/refresh tokens to localStorage.
+        persistSession: false,
+
+        // Keep an active in-memory session refreshed while this page is open.
+        autoRefreshToken: true,
+
+        // Keep support for Supabase email-confirmation callbacks.
+        detectSessionInUrl: true,
+      },
+    })
+  : { auth: unavailableAuth }

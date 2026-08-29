@@ -1,87 +1,85 @@
-import { Nav, Footer, InfoNote } from './components'
-import { company, serviceLines } from './data/company'
-import hero from './assets/pictures/94423466-9af4-4ef6-a238-a24c98a65c1e.jpg'
+import { Nav, Footer } from './components'
+import { serviceLines } from './data/company'
+import hero from './assets/pictures/download.jpg'
 import project from './assets/pictures/8e738016-5df0-4c6b-b121-d8d3c90a4a67.jpg'
+import shield from './assets/icons/shield.png'
+import extinguisher from './assets/icons/fire-extinguisher.png'
+import setting from './assets/icons/setting.png'
+
+const portalFeatures = ['Submit quotation requests', 'Request fire protection services', 'Keep project and request details organized', 'Access your customer account']
 
 export default function Home() {
   return (
-    <>
+    <div className="landing-page">
       <Nav />
       <main>
-        <section className="home-hero">
-          <div className="shell hero-grid">
-            <div className="hero-copy">
-              <span className="eyebrow">FIRE PROTECTION PRODUCT TRADING</span>
-              <h1>Practical fire protection for real facilities.</h1>
-              <p>{company.tagline} Katala supports product supply, fire alarm work, sprinkler systems, pump installations, and preventive maintenance for facility requirements.</p>
-              <div className="hero-actions">
-                <a className="btn primary" href="#products">Browse Products</a>
-                <a className="btn secondary" href="#services">Explore Services</a>
+        <section className="landing-hero">
+          <div className="shell landing-hero-grid">
+            <div className="landing-hero-copy">
+              <span className="eyebrow">KATALA FIRE PROTECTION PRODUCT TRADING</span>
+              <h1>Fire Protection Solutions You Can Rely On</h1>
+              <p>Explore dependable fire protection products and service support, then use the Katala Client Portal to submit quotations and service requests in one organized place.</p>
+              <div className="hero-actions landing-actions">
+                <a className="btn primary" href="#signup">Create an Account <span aria-hidden="true">→</span></a>
+                <a className="btn secondary" href="#signin">Sign In to Client Portal</a>
               </div>
-              <div className="hero-contact">
-                <span>{company.phone}</span>
-                <span>{company.email}</span>
-              </div>
+              <div className="landing-assurance"><span>Products</span><span>Service support</span><span>Customer portal</span></div>
             </div>
-            <div className="hero-media">
-              <img src={hero} alt="Katala fire protection equipment" />
-              <div className="media-caption">Fire protection products and project support</div>
+            <div className="landing-hero-media">
+              <img src={hero} alt="Katala fire protection system installation" />
+              <div className="hero-media-panel"><strong>Protection starts with the right solution.</strong><span>Product supply, project support, and preventive maintenance.</span></div>
             </div>
           </div>
         </section>
 
-        <section className="trust-strip">
-          <div className="shell trust-grid">
-            <div><strong>2022</strong><span>Family-owned business roots</span></div>
-            <div><strong>Cavite</strong><span>Based in Dasmariñas</span></div>
-            <div><strong>Products</strong><span>Fire protection equipment and accessories</span></div>
-            <div><strong>Services</strong><span>Systems, installation, and maintenance support</span></div>
+        <section className="landing-intro" id="about">
+          <div className="shell landing-intro-grid">
+            <div><span className="eyebrow">ABOUT KATALA</span><h2>Practical fire protection support for real facilities.</h2></div>
+            <div><p>Katala Fire Protection Product Trading supports commercial and institutional fire-safety requirements through fire protection products, system services, and project-based assistance.</p><a className="text-link" href="#company">Learn more about Katala →</a></div>
           </div>
         </section>
 
-        <section className="section">
+        <section className="section landing-solutions" id="solutions">
           <div className="shell">
-            <div className="section-heading split-heading">
-              <div>
-                <span className="eyebrow">WHAT KATALA OFFERS</span>
-                <h2>Fire protection products and service support</h2>
-              </div>
-              <p>Choose the service area that matches your facility requirement, then send Katala the project details for review.</p>
-            </div>
-            <div className="service-grid compact">
-              {serviceLines.map((item, index) => (
-                <article className="service-tile" key={item.title}>
-                  <span className="service-number">{String(index + 1).padStart(2, '0')}</span>
-                  <h3>{item.title}</h3>
-                  <p>{item.copy}</p>
-                  <small>{item.proof}</small>
+            <div className="section-heading landing-heading"><span className="eyebrow">PRODUCTS &amp; SOLUTIONS</span><h2>Fire protection for every stage of your requirement.</h2><p>From equipment selection to installation and maintenance support, Katala helps customers identify an appropriate next step.</p></div>
+            <div className="landing-solution-grid">
+              {serviceLines.slice(0, 6).map((item, index) => (
+                <article className="landing-solution-card" key={item.title}>
+                  <span className="solution-index">0{index + 1}</span><h3>{item.title}</h3><p>{item.copy}</p>
+                  <a href={index === 0 ? '#products' : '#services'}>Explore {index === 0 ? 'products' : 'services'} →</a>
                 </article>
               ))}
             </div>
           </div>
         </section>
 
-        <section className="section surface">
-          <div className="shell evidence-grid">
-            <img src={project} alt="Fire alarm system project" />
-            <div>
-              <span className="eyebrow">PROJECT EXPERIENCE</span>
-              <h2>See examples of Katala’s completed project work.</h2>
-              <p>Browse selected fire alarm, preventive maintenance, and fire pump projects completed for commercial and institutional clients.</p>
-              <a className="text-link" href="#portfolio">View projects →</a>
+        <section className="section landing-why">
+          <div className="shell landing-why-grid">
+            <div className="landing-project-image"><img src={project} alt="Katala fire protection project work" /></div>
+            <div className="landing-why-copy">
+              <span className="eyebrow">WHY KATALA</span><h2>Clear support from inquiry to project request.</h2>
+              <p>Katala brings product information, service support, and customer requests together so your fire protection requirement can be reviewed with the right context.</p>
+              <div className="why-list">
+                <div><img src={extinguisher} alt="" /><span><strong>Focused solutions</strong>Products and services centered on fire protection needs.</span></div>
+                <div><img src={setting} alt="" /><span><strong>Service support</strong>Assistance for installation, systems, and preventive maintenance.</span></div>
+                <div><img src={shield} alt="" /><span><strong>Organized requests</strong>A dedicated customer portal for quotations and service details.</span></div>
+              </div>
             </div>
           </div>
         </section>
 
-        <section className="section">
-          <div className="shell">
-            <InfoNote title="Need a quotation or service review?">
-              Create a customer account, add the products you need to a quotation cart, or submit a service request with your project details.
-            </InfoNote>
+        <section className="section portal-section" id="portal">
+          <div className="shell portal-card">
+            <div className="portal-card-copy"><span className="eyebrow">KATALA CLIENT PORTAL</span><h2>Your requests, kept in one place.</h2><p>Create a customer account to send Katala the information needed to review your quotation or service requirement.</p><div className="hero-actions"><a className="btn primary" href="#signup">Create an Account</a><a className="btn portal-secondary" href="#signin">Sign In</a></div></div>
+            <ul className="portal-feature-list">{portalFeatures.map((feature) => <li key={feature}><span aria-hidden="true">✓</span>{feature}</li>)}</ul>
           </div>
+        </section>
+
+        <section className="landing-contact">
+          <div className="shell landing-contact-inner"><div><span className="eyebrow">TALK TO KATALA</span><h2>Need help with a fire protection requirement?</h2></div></div>
         </section>
       </main>
       <Footer />
-    </>
+    </div>
   )
 }

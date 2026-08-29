@@ -38,10 +38,13 @@
 }
 
 .auth-brand img {
-  width: 25px;
-  height: 25px;
+  width: 42px;
+  height: 42px;
   object-fit: contain;
 }
+
+.auth-brand .katala-lockup-copy strong { font-size: 1.28rem; }
+.auth-brand .katala-lockup-copy small { font-size: .5rem; }
 
 .visual-copy > p {
   max-width: 520px;

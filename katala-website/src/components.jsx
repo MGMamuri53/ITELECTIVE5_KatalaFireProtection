@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import logo from './assets/icons/fire.png'
+import KatalaBrand from './KatalaBrand'
 import { company } from './data/company'
 import { authApi, getStoredSession } from './services/katalaApi'
 
@@ -34,7 +34,7 @@ export function Nav({ active = '' }) {
     <header className="site-nav">
       <div className="shell nav-inner">
         <a className="brand" href="#home" onClick={() => setOpen(false)} aria-label="Katala home">
-          <img src={logo} alt="Katala Fire Protection Product Trading" />
+          <KatalaBrand compact />
         </a>
         <nav className={`nav-links ${open ? 'open' : ''}`} aria-label="Primary navigation">
           {navItems.map(([id, label]) => (
@@ -45,10 +45,13 @@ export function Nav({ active = '' }) {
           {session?.token ? (
             <AccountMenu className="mobile-account" session={session} onSignOut={signOut} onNavigate={() => setOpen(false)} />
           ) : (
-            <a className="mobile-account" href="#signin" onClick={() => setOpen(false)}>Sign in</a>
+            <>
+              <a className="mobile-account" href="#signin" onClick={() => setOpen(false)}>Sign in</a>
+              <a className="mobile-account mobile-create" href="#signup" onClick={() => setOpen(false)}>Create Account</a>
+            </>
           )}
         </nav>
-        <a className="nav-quote" href="#products">Request Quote</a>
+        <a className="nav-quote" href={session?.token ? '#products' : '#signup'}>{session?.token ? 'Request Quote' : 'Create Account'}</a>
         {session?.token ? (
           <AccountMenu className="desktop-account" session={session} onSignOut={signOut} />
         ) : (
@@ -116,23 +119,24 @@ export function Footer() {
     <footer className="site-footer">
       <div className="shell footer-grid">
         <div>
-          <img className="footer-logo" src={logo} alt="Katala Fire Protection Product Trading" />
-          <p>{company.tagline}</p>
-          <p className="muted">Fire protection products, systems support, and maintenance services for commercial and institutional requirements.</p>
+          <KatalaBrand light />
+          <p className="footer-tagline">{company.tagline}</p>
+          <p className="muted">Fire protection products, system support, and maintenance services for facility requirements.</p>
         </div>
         <div>
-          <h4>Navigate</h4>
-          <a href="#products">Products</a>
-          <a href="#services">Services</a>
-          <a href="#portfolio">Projects</a>
-          <a href="#company">Company Profile</a>
+          <h4>Quick Links</h4>
+          <a href="#home">Home</a>
+          <a href="#home">About</a>
+          <a href="#products">Products / Services</a>
+          <a href="#signin">Client Portal</a>
         </div>
         <div>
-          <h4>Contact</h4>
-          <a href={`mailto:${company.email}`}>{company.email}</a>
-          <a href={`tel:${company.phone.replace(/[^\d+]/g, '')}`}>{company.phone}</a>
-          <span>{company.address}</span>
-          <span>Facebook: {company.facebook}</span>
+          <h4>Contact Information</h4>
+          <span>Greenbreeze Village 1, Langkaan</span>
+          <span>Dasmarinas City, Cavite</span>
+          <a href="mailto:pfkatala@gmail.com">pfkatala@gmail.com</a>
+          <a href="tel:0462304234">Tel: 0462304234</a>
+          <a href="tel:09606819547">Mobile: 09606819547</a>
         </div>
       </div>
       <div className="shell footer-bottom">© {new Date().getFullYear()} {company.legalName}</div>

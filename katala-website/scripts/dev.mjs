@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process'
+import net from 'node:net'
 
 const children = new Set()
 let shuttingDown = false
@@ -48,9 +49,29 @@ function shutdown(exitCode = 0) {
   setTimeout(() => process.exit(exitCode), 200).unref()
 }
 
+function isPortInUse(port, host = '127.0.0.1') {
+  return new Promise((resolve) => {
+    const socket = net.createConnection({ port, host })
+    socket.setTimeout(500)
+    socket.once('connect', () => {
+      socket.destroy()
+      resolve(true)
+    })
+    socket.once('timeout', () => {
+      socket.destroy()
+      resolve(false)
+    })
+    socket.once('error', () => resolve(false))
+  })
+}
+
 process.on('SIGINT', () => shutdown(0))
 process.on('SIGTERM', () => shutdown(0))
 
-console.log('Starting Katala API and Vite development server...')
-start('api')
+console.log('Starting Katala development environment...')
+if (await isPortInUse(Number(process.env.PORT || 3001))) {
+  console.log('Port 3001 is already in use; reusing the running API server.')
+} else {
+  start('api')
+}
 start('dev:web')

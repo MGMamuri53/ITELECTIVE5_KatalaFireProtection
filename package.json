@@ -4,7 +4,12 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "dev": "npm --prefix katala-website run dev",
+    "dev:web": "npm --prefix katala-website run dev:web",
+    "api": "npm --prefix katala-website run api",
+    "build": "npm --prefix katala-website run build",
+    "preview": "npm --prefix katala-website run preview",
+    "install:app": "npm --prefix katala-website install"
   },
   "repository": {
     "type": "git",

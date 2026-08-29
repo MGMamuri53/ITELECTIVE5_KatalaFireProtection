@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react'
 import building from './assets/pictures/download.jpg'
-import fire from './assets/icons/fire.png'
 import shield from './assets/icons/shield.png'
+import KatalaBrand from './KatalaBrand'
 import { authApi } from './services/katalaApi'
 import './signup.css'
 
@@ -134,7 +134,7 @@ export default function Signup() {
     <main className="auth-page">
       <section className="auth-visual" style={{ backgroundImage: `url(${building})` }}>
         <div className="visual-copy">
-          <div className="auth-brand"><img src={fire} alt="" />Katala Client Portal</div>
+          <div className="auth-brand"><KatalaBrand light compact /></div>
           <p>Fire protection support, quotations, and service requests in one place.</p>
           <div className="portal-note">
             <img src={shield} alt="" />

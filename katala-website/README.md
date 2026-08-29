@@ -1,4 +1,14 @@
-# React + Vite
+# Katala Website
+
+From the repository root, install and run the website with:
+
+```powershell
+npm run install:app
+npm run dev
+```
+
+Then open `http://localhost:5173/`. The `dev` command starts both the Vite
+frontend and the API server. To run only the frontend, use `npm run dev:web`.
 
 This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
 
