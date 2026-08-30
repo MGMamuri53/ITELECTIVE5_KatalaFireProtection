@@ -4,6 +4,7 @@ const demoUserId = (import.meta.env.VITE_DEMO_USER_ID || '').trim()
 const AUTH_KEY = 'katala-auth-v2'
 let currentSessionSnapshot = null
 let authReady = false
+let portalSessionCache = { token: '', expiresAt: 0, user: null, promise: null }
 
 function sameUser(a, b) {
   return JSON.stringify(a || null) === JSON.stringify(b || null)
@@ -156,23 +157,46 @@ function patchSessionUser(patch) {
 }
 
 async function loadPortalSession(session) {
-  const response = await fetch('/api/auth/portal-session', {
-    headers: {
-      Authorization: `Bearer ${session.access_token}`,
-    },
-  })
-  const data = await response.json().catch(() => ({}))
-  if (!response.ok) {
-    const error = new Error(data.error || `Request failed (${response.status}).`)
-    error.status = response.status
-    throw error
+  const token = session?.access_token || ''
+  if (!token) return null
+
+  if (portalSessionCache.token === token && portalSessionCache.user && Date.now() < portalSessionCache.expiresAt) {
+    return portalSessionCache.user
   }
-  return data.user
+  if (portalSessionCache.token === token && portalSessionCache.promise) {
+    return await portalSessionCache.promise
+  }
+
+  portalSessionCache = {
+    token,
+    expiresAt: 0,
+    user: null,
+    promise: fetch('/api/auth/portal-session', {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    }).then(async (response) => {
+      const data = await response.json().catch(() => ({}))
+      if (!response.ok) {
+        const error = new Error(data.error || `Request failed (${response.status}).`)
+        error.status = response.status
+        throw error
+      }
+      portalSessionCache.user = data.user || null
+      portalSessionCache.expiresAt = Date.now() + 5_000
+      return portalSessionCache.user
+    }).finally(() => {
+      portalSessionCache.promise = null
+    }),
+  }
+
+  return await portalSessionCache.promise
 }
 
 export function clearStoredSession() {
   const hadSession = Boolean(currentSessionSnapshot)
   currentSessionSnapshot = null
+  portalSessionCache = { token: '', expiresAt: 0, user: null, promise: null }
 
   // Clean up snapshots that may have been created by an older build.
   try {
@@ -296,12 +320,13 @@ export const authApi = {
     const requestedPortal = String(portal || 'customer').toLowerCase()
     const role = user?.role || 'customer'
     const allowed = requestedPortal === 'customer'
-      || role === requestedPortal
-      || (requestedPortal === 'staff' && role === 'admin')
+      ? role === 'customer'
+      : role === requestedPortal || (requestedPortal === 'staff' && role === 'admin')
     if (!allowed) {
       await supabase.auth.signOut().catch(() => {})
       clearStoredSession()
-      throw new Error(`This account is registered as ${role}, not ${requestedPortal}.`)
+      const portalLabel = role === 'admin' ? 'Administrator' : role.charAt(0).toUpperCase() + role.slice(1)
+      throw new Error(`This account is registered as ${portalLabel}. Choose the matching portal in "Sign in as".`)
     }
     return { ok: true, user, session: data.session }
   },

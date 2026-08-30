@@ -33,6 +33,23 @@ const supabaseAuth = supabaseUrl && supabasePublishableKey
   : null
 
 const requestLog = new Map()
+const RATE_LIMIT_WINDOW_MS = 60_000
+
+function rateLimitPolicy(req, url) {
+  if (req.method === 'OPTIONS') return null
+  if (url.pathname === '/api/health') return null
+
+  if (url.pathname === '/api/auth/portal-session') {
+    return { limit: 120, scope: 'auth-session' }
+  }
+  if (url.pathname.startsWith('/api/auth/')) {
+    return { limit: 60, scope: 'auth' }
+  }
+  if (req.method === 'GET') {
+    return { limit: 180, scope: 'read' }
+  }
+  return { limit: 80, scope: 'write' }
+}
 
 function sendJson(res, status, payload) {
   res.writeHead(status, {
@@ -70,9 +87,14 @@ function setCors(req, res) {
 }
 
 function clean(value, max = 500) {
-  return typeof value === 'string'
-    ? value.replace(/[\u0000-\u001F\u007F]/g, ' ').trim().slice(0, max)
-    : ''
+  if (typeof value !== 'string') return ''
+
+  let sanitized = ''
+  for (const character of value) {
+    const code = character.charCodeAt(0)
+    sanitized += code <= 31 || code === 127 ? ' ' : character
+  }
+  return sanitized.trim().slice(0, max)
 }
 
 function nullable(value, max = 500) {
@@ -84,13 +106,26 @@ function isUuid(value) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
 }
 
-function isRateLimited(req) {
+function isRateLimited(req, url) {
+  const policy = rateLimitPolicy(req, url)
+  if (!policy) return false
+
   const now = Date.now()
   const ip = req.socket.remoteAddress || 'unknown'
-  const recent = (requestLog.get(ip) || []).filter((time) => now - time < 60_000)
+  const token = getBearerToken(req)
+  const identity = token ? `token:${token.slice(-24)}` : `ip:${ip}`
+  const key = `${policy.scope}:${identity}`
+  const recent = (requestLog.get(key) || []).filter((time) => now - time < RATE_LIMIT_WINDOW_MS)
   recent.push(now)
-  requestLog.set(ip, recent)
-  return recent.length > 30
+  requestLog.set(key, recent)
+
+  for (const [entryKey, timestamps] of requestLog.entries()) {
+    const active = timestamps.filter((time) => now - time < RATE_LIMIT_WINDOW_MS)
+    if (active.length) requestLog.set(entryKey, active)
+    else requestLog.delete(entryKey)
+  }
+
+  return recent.length > policy.limit
 }
 
 async function readRawBody(req, maxSize = 64_000) {
@@ -128,15 +163,19 @@ function csv(value) {
     .filter(Boolean)
 }
 
-function authRole(user) {
-  const email = String(user?.email || '').toLowerCase()
-  const app = user?.app_metadata || {}
-  const meta = user?.user_metadata || {}
+function configuredPortalRole(email) {
+  const normalizedEmail = String(email || '').toLowerCase()
   const configuredAdmins = csv(process.env.ADMIN_EMAILS)
   const configuredStaff = csv(process.env.STAFF_EMAILS)
 
-  if (configuredAdmins.includes(email)) return 'admin'
-  if (configuredStaff.includes(email)) return 'staff'
+  if (configuredAdmins.includes(normalizedEmail)) return 'admin'
+  if (configuredStaff.includes(normalizedEmail)) return 'staff'
+  return ''
+}
+
+function authRole(user) {
+  const app = user?.app_metadata || {}
+  const meta = user?.user_metadata || {}
 
   const role = String(
     app.role
@@ -149,9 +188,9 @@ function authRole(user) {
   return ['admin', 'staff', 'customer'].includes(role) ? role : 'customer'
 }
 
-async function databaseRole(userId) {
-  if (!pool || !isUuid(userId)) return ''
-  const result = await pool.query(
+async function databaseRole(userId, client = pool) {
+  if (!client || !isUuid(userId)) return ''
+  const result = await client.query(
     `SELECT r.v_rolename
        FROM public.tbl_userrole ur
        JOIN public.tbl_role r ON r.v_roleid = ur.v_roleid
@@ -207,20 +246,76 @@ async function userAccountRecord(userId, client = pool) {
   return result.rows[0] || null
 }
 
+function authUserNames(user) {
+  const meta = user?.user_metadata || {}
+  const firstName = clean(meta.first_name || meta.firstName || meta.given_name, 120)
+  const lastName = clean(meta.last_name || meta.lastName || meta.family_name, 120)
+  if (firstName || lastName) {
+    return {
+      firstName: firstName || 'Katala',
+      lastName: lastName || 'Customer',
+    }
+  }
+
+  const fullName = clean(meta.full_name || meta.name, 240)
+  const parts = fullName.split(/\s+/).filter(Boolean)
+  if (parts.length > 1) {
+    return {
+      firstName: parts.slice(0, -1).join(' ').slice(0, 120),
+      lastName: parts.at(-1).slice(0, 120),
+    }
+  }
+
+  const emailName = String(user?.email || 'customer').split('@')[0].replace(/[._-]+/g, ' ').trim()
+  return {
+    firstName: clean(parts[0] || emailName || 'Katala', 120),
+    lastName: 'Customer',
+  }
+}
+
+async function ensureAuthUserProfile(client, user) {
+  if (!client || !isUuid(user?.id)) return null
+  const existing = await userAccountRecord(user.id, client)
+  const configuredRole = configuredPortalRole(user.email)
+  const currentRole = existing ? await databaseRole(user.id, client) : ''
+  const role = configuredRole || currentRole || authRole(user)
+  const status = configuredRole ? 'Active' : normalizeAccountStatus(existing?.v_accountstatus)
+
+  if (!existing) {
+    const names = authUserNames(user)
+    await client.query(
+      `INSERT INTO public.tbl_user
+        (v_userid, v_firstname, v_lastname, v_emailaddress, v_accountstatus)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (v_userid) DO NOTHING`,
+      [user.id, names.firstName, names.lastName, String(user.email || '').toLowerCase(), status],
+    )
+  } else if (configuredRole && normalizeAccountStatus(existing.v_accountstatus) !== 'Active') {
+    await client.query(
+      'UPDATE public.tbl_user SET v_accountstatus = $2, v_updatedat = now() WHERE v_userid = $1',
+      [user.id, 'Active'],
+    )
+  }
+
+  if (configuredRole || !currentRole) await assignSingleRole(client, user.id, role)
+  return await userAccountRecord(user.id, client)
+}
+
 async function getAuthenticatedUser(req) {
   const token = getBearerToken(req)
   if (token && supabaseAuth) {
     const { data, error } = await supabaseAuth.auth.getUser(token)
     if (!error && data?.user?.id) {
-      const account = await userAccountRecord(data.user.id).catch(() => null)
+      const account = await ensureAuthUserProfile(pool, data.user)
+      const configuredRole = configuredPortalRole(data.user.email)
       return {
         id: data.user.id,
         email: data.user.email || '',
         name: account ? [account.v_firstname, account.v_lastname].filter(Boolean).join(' ') : '',
-        accountStatus: normalizeAccountStatus(account?.v_accountstatus),
+        accountStatus: configuredRole ? 'Active' : normalizeAccountStatus(account?.v_accountstatus),
         companyName: account?.v_companyname || null,
         contactNumber: account?.v_contactnumber || null,
-        role: await databaseRole(data.user.id) || authRole(data.user),
+        role: configuredRole || await databaseRole(data.user.id) || authRole(data.user),
       }
     }
   }
@@ -413,8 +508,8 @@ async function handleRegisterProfile(req, res) {
   const email = clean(body.email, 180).toLowerCase()
   const firstName = clean(body.firstName, 120)
   const lastName = clean(body.lastName, 120)
-  const accountType = publicSignupRole(body.accountType)
-  const status = accountType === 'staff' ? 'Pending' : 'Active'
+  const accountType = configuredPortalRole(email) || publicSignupRole(body.accountType)
+  const status = accountType === 'staff' && !configuredPortalRole(email) ? 'Pending' : 'Active'
 
   if (!isUuid(userId)) return sendJson(res, 400, { error: 'Invalid signup user id.' })
   if (!firstName || !lastName || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
@@ -2378,9 +2473,8 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(204)
     return res.end()
   }
-  if (isRateLimited(req)) return sendJson(res, 429, { error: 'Too many requests. Please try again in a minute.' })
-
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`)
+  if (isRateLimited(req, url)) return sendJson(res, 429, { error: 'Too many requests. Please wait a few seconds and try again.' })
   const quotationMatch = url.pathname.match(/^\/api\/quotations\/([^/]+)$/)
   const quotationCheckoutMatch = url.pathname.match(/^\/api\/quotations\/([^/]+)\/paymongo-checkout$/)
   const serviceRequestMatch = url.pathname.match(/^\/api\/service-requests\/([^/]+)$/)
