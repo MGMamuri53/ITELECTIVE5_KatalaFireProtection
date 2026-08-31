@@ -229,7 +229,7 @@ export default function Signup() {
 
                 <div className="privacy">
                   <img src={shield} alt="" />
-                  <span>Your password is handled by Supabase Auth and is never stored in the Katala profile table.</span>
+                  <span>Your password is securely hashed for local XAMPP sign-in and is never stored as plain text.</span>
                 </div>
 
                 {status.type !== 'idle' && <div className={`auth-status ${status.type}`} role="status">{status.message}</div>}

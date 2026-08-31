@@ -145,6 +145,7 @@ img { max-width: 100%; }
 .service-card { display: flex; flex-direction: column; min-height: 340px; }
 .service-card-top { display: flex; justify-content: space-between; gap: 12px; color: var(--muted); font-size: .76rem; text-transform: uppercase; letter-spacing: .08em; }
 .service-card-top strong { color: var(--red); }
+.service-card-image { width: 100%; height: 150px; object-fit: cover; border-radius: 10px; border: 1px solid var(--line); margin: 16px 0 0; background: #f8fafc; }
 .service-card h2 { color: var(--navy); margin: 20px 0 10px; font-size: 1.45rem; }
 .service-card > p { color: var(--muted); line-height: 1.65; }
 .service-estimate { display: flex; justify-content: space-between; gap: 12px; align-items: center; margin: 0 0 18px; padding: 10px 12px; background: #f7f9fc; border: 1px solid var(--line); border-radius: 8px; }
@@ -363,12 +364,15 @@ img { max-width: 100%; }
 .catalog-card { display: flex; flex-direction: column; }
 .catalog-card-body { display: flex; flex-direction: column; flex: 1; }
 .variant-preview { flex: 1; }
-.product-card-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: auto; }
+.product-card-actions { display: grid; grid-template-columns: repeat(auto-fit, minmax(0, 1fr)); gap: 8px; margin-top: auto; }
 .product-card-actions .btn { width: 100%; min-height: 48px; height: 100%; }
 
 .quick-cart-fields { display: grid; grid-template-columns: 1fr 130px; gap: 12px; margin: 16px 0; }
 .quick-cart-fields label, .manage-select { display: grid; gap: 6px; color: #46536a; font-size: .82rem; font-weight: 800; }
 .quick-cart-fields input, .quick-cart-fields select, .manage-select select { width: 100%; border: 1px solid #cbd3df; background: white; border-radius: 8px; padding: 10px 11px; color: var(--ink); }
+.cart-confirm-summary { display: grid; grid-template-columns: 1fr; gap: 8px; margin: 16px 0; color: #46536a; line-height: 1.45; }
+.cart-confirm-summary span { display: grid; gap: 2px; min-width: 0; overflow-wrap: anywhere; }
+.cart-confirm-summary strong { color: var(--navy); }
 .modal-cart-actions { display: flex; gap: 10px; flex-wrap: wrap; }
 
 .cart-modal { width: min(900px, 100%); }
@@ -427,9 +431,10 @@ img { max-width: 100%; }
 .receipt-meta span, .receipt-total span { display: block; color: var(--muted); font-size: .74rem; margin-bottom: 4px; }
 .receipt-meta strong { color: var(--navy); font-size: .86rem; word-break: break-word; }
 .receipt-lines { display: grid; gap: 8px; }
-.receipt-lines > div { display: flex; justify-content: space-between; gap: 18px; padding: 12px; background: #f7f9fc; border-radius: 8px; }
-.receipt-lines strong { color: var(--navy); }
-.receipt-lines span { color: var(--muted); font-size: .84rem; }
+.receipt-lines > div { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 18px; align-items: start; padding: 12px; background: #f7f9fc; border-radius: 8px; }
+.receipt-lines > div > div { display: grid; gap: 4px; min-width: 0; }
+.receipt-lines strong { color: var(--navy); overflow-wrap: anywhere; }
+.receipt-lines span { color: var(--muted); font-size: .84rem; overflow-wrap: anywhere; }
 .receipt-lines > div > span { color: var(--navy); font-weight: 800; white-space: nowrap; }
 .receipt-total { display: flex; justify-content: space-between; gap: 18px; align-items: center; border-top: 1px solid var(--line); margin-top: 18px; padding-top: 16px; }
 .receipt-total strong { color: var(--navy); font-size: 1.25rem; }
@@ -748,7 +753,7 @@ img { max-width: 100%; }
 .inbox-card span, .inbox-card p { color: var(--muted); font-size: .86rem; line-height: 1.5; }
 .inbox-card p { margin: 5px 0; }
 .inbox-card b { color: var(--navy); }
-.profile-schedule-alert { display: flex; align-items: center; gap: 7px; color: #8a5a00 !important; font-weight: 800; }
+.profile-schedule-alert { display: flex; align-items: flex-start; gap: 7px; color: #8a5a00 !important; font-weight: 800; overflow-wrap: anywhere; }
 .profile-schedule-alert b { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 999px; background: #fff7db; color: #9a6700 !important; border: 1px solid #f2d184; font-size: .78rem; line-height: 1; flex: 0 0 auto; }
 .profile-quote-box {
   display: grid;

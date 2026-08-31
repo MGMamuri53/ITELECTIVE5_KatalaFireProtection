@@ -9,6 +9,21 @@ function initialEmail() {
   return sessionStorage.getItem('katala-signin-email') || ''
 }
 
+const staffRoutes = new Set(['staff', 'staff-work-queue', 'staff-messages', 'staff-paid-assignments', 'staff-service-calendar', 'staff-maintenance', 'staff-completed', 'staff-settings'])
+
+function defaultPageForRole(role) {
+  if (role === 'admin') return 'admin'
+  if (role === 'staff') return 'staff-work-queue'
+  return 'profile'
+}
+
+function canAccessReturnPage(page, role) {
+  if (page === 'admin') return role === 'admin'
+  if (staffRoutes.has(page)) return role === 'staff' || role === 'admin'
+  if (page === 'profile') return role === 'customer'
+  return true
+}
+
 export default function Signin() {
   const [form, setForm] = useState(() => ({ email: initialEmail(), password: '', portal: 'customer' }))
   const [status, setStatus] = useState({ type: 'idle', message: '' })
@@ -35,12 +50,10 @@ export default function Signin() {
     try {
       const data = await authApi.signin({ email, password: form.password, portal: form.portal })
       sessionStorage.removeItem('katala-signin-email')
-      const defaultPage = data.user?.role === 'admin'
-        ? 'admin'
-        : data.user?.role === 'staff'
-          ? 'staff-work-queue'
-          : 'profile'
-      const returnPage = sessionStorage.getItem('katala-return-after-auth') || defaultPage
+      const role = data.user?.role || 'customer'
+      const defaultPage = defaultPageForRole(role)
+      const savedReturnPage = sessionStorage.getItem('katala-return-after-auth') || defaultPage
+      const returnPage = canAccessReturnPage(savedReturnPage, role) ? savedReturnPage : defaultPage
       sessionStorage.removeItem('katala-return-after-auth')
       sessionStorage.removeItem('katala-login-in-progress')
       location.hash = returnPage

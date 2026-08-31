@@ -41,6 +41,18 @@ function defaultRouteForRole(role) {
   return 'profile'
 }
 
+function canAccessRoute(route, role, hasToken) {
+  if (!protectedRoutes.has(route)) return true
+  if (!hasToken) return false
+  if (route === 'admin') return role === 'admin'
+  if (staffRoutes.has(route)) return role === 'staff' || role === 'admin'
+  return route === 'profile'
+}
+
+function safeRouteForRole(route, role, hasToken) {
+  return canAccessRoute(route, role, hasToken) ? route : defaultRouteForRole(role)
+}
+
 function currentRoute() {
   const route = location.hash
     .slice(1)
@@ -77,19 +89,30 @@ export default function App() {
       // the registration/sign-in screen once that session is available.
       if (session?.token && (route === 'signup' || route === 'signin')) {
         if (route === 'signin' && sessionStorage.getItem('katala-login-in-progress')) return
-        const returnPage = sessionStorage.getItem('katala-return-after-auth') || defaultRouteForRole(role)
+        const savedReturnPage = sessionStorage.getItem('katala-return-after-auth') || defaultRouteForRole(role)
+        const returnPage = safeRouteForRole(savedReturnPage, role, Boolean(session?.token))
         sessionStorage.removeItem('katala-return-after-auth')
         location.hash = returnPage
       }
 
-      if (route === 'admin' && (!session?.token || role !== 'admin')) {
+      if (route === 'admin' && !session?.token) {
         sessionStorage.setItem('katala-return-after-auth', 'admin')
         location.hash = 'signin'
       }
 
-      if (staffRoutes.has(route) && (!session?.token || !['staff', 'admin'].includes(role))) {
+      if (route === 'admin' && session?.token && role !== 'admin') {
+        sessionStorage.removeItem('katala-return-after-auth')
+        location.hash = defaultRouteForRole(role)
+      }
+
+      if (staffRoutes.has(route) && !session?.token) {
         sessionStorage.setItem('katala-return-after-auth', route)
         location.hash = 'signin'
+      }
+
+      if (staffRoutes.has(route) && session?.token && !['staff', 'admin'].includes(role)) {
+        sessionStorage.removeItem('katala-return-after-auth')
+        location.hash = defaultRouteForRole(role)
       }
     }
 

@@ -1,13 +1,13 @@
 import { useEffect, useState } from 'react'
 import { Footer, Nav, PageIntro } from './components'
 import { getStoredSession, schemaApi } from './services/katalaApi'
-import { buildReceipt, getWorkflow, normalizeQuotation, subscribeWorkflowChanges, upsertWorkflow } from './Staff/staffWorkflow'
+import { buildReceipt, getWorkflow, normalizeQuotation, subscribeWorkflowChanges } from './Staff/staffWorkflow'
 
 export default function Profile() {
   const session = getStoredSession()
   const user = session?.user
   const signedIn = Boolean(session?.token)
-  const [inbox, setInbox] = useState({ quotations: [], serviceRequests: [] })
+  const [inbox, setInbox] = useState({ quotations: [], serviceRequests: [], notifications: [] })
   const [status, setStatus] = useState({ type: 'loading', message: 'Loading inbox...' })
   const [receipt, setReceipt] = useState(null)
   const [quotePreview, setQuotePreview] = useState(null)
@@ -23,6 +23,7 @@ export default function Profile() {
       setInbox((current) => ({
         quotations: current.quotations.map(withWorkflow),
         serviceRequests: current.serviceRequests.map(withWorkflow),
+        notifications: current.notifications || [],
       }))
     }
     const unsubscribeWorkflow = subscribeWorkflowChanges(sync)
@@ -33,6 +34,7 @@ export default function Profile() {
         setInbox({
           quotations: (data.quotations || []).map(withWorkflow),
           serviceRequests: (data.serviceRequests || []).map(withWorkflow),
+          notifications: data.notifications || [],
         })
         setStatus({ type: 'idle', message: '' })
       })
@@ -52,6 +54,7 @@ export default function Profile() {
       setInbox({
         quotations: (data.quotations || []).map(withWorkflow),
         serviceRequests: (data.serviceRequests || []).map(withWorkflow),
+        notifications: data.notifications || [],
       })
       if (showStatus) setStatus({ type: 'success', message: 'Customer inbox refreshed.' })
     } catch (error) {
@@ -60,19 +63,18 @@ export default function Profile() {
     }
   }
 
-  function updateLocalReference(referenceNumber, patch) {
-    const next = upsertWorkflow(referenceNumber, patch)
-    setInbox((current) => ({
-      quotations: current.quotations.map((item) => item.referenceNumber === referenceNumber ? withWorkflow({ ...item, ...next }) : item),
-      serviceRequests: current.serviceRequests.map((item) => item.referenceNumber === referenceNumber ? withWorkflow({ ...item, ...next }) : item),
-    }))
+  function updateQuotationInInbox(quotation) {
+    updateItemInInbox(quotation)
   }
 
-  function updateQuotationInInbox(quotation) {
+  function updateItemInInbox(nextItem) {
     setInbox((current) => ({
       ...current,
-      quotations: current.quotations.map((item) =>
-        item.referenceNumber === quotation.referenceNumber ? withWorkflow({ ...item, ...quotation }) : item
+      quotations: current.quotations.map((quote) =>
+        quote.referenceNumber === nextItem.referenceNumber ? withWorkflow({ ...quote, ...nextItem }) : quote
+      ),
+      serviceRequests: current.serviceRequests.map((request) =>
+        request.referenceNumber === nextItem.referenceNumber ? withWorkflow({ ...request, ...nextItem }) : request
       ),
     }))
   }
@@ -90,25 +92,38 @@ export default function Profile() {
     }
   }
 
-  function confirmQuotation(item) {
-    updateLocalReference(item.referenceNumber, { status: 'Customer Confirmed' })
-    setPaymentConfirm(withWorkflow({ ...item, status: 'Customer Confirmed' }))
+  async function confirmQuotation(item) {
+    setStatus({ type: 'loading', message: 'Confirming quotation...' })
+    try {
+      const isServiceItem = item.kind === 'Service'
+      const data = isServiceItem
+        ? await schemaApi.confirmServiceRequest(item.referenceNumber)
+        : await schemaApi.confirmQuotation(item.referenceNumber)
+      const confirmed = withWorkflow((isServiceItem ? data.serviceRequest : data.quotation) || { ...item, status: 'Customer Confirmed' })
+      updateItemInInbox(confirmed)
+      setPaymentConfirm(confirmed)
+      setStatus({ type: 'idle', message: '' })
+    } catch (error) {
+      setStatus({ type: 'error', message: error.message || 'Unable to confirm quotation.' })
+    }
   }
 
-  function payQuotation(item) {
-    const paidAt = new Date().toISOString()
-    const payment = {
-      paidAt,
-      receiptNumber: `RCT-${paidAt.slice(0, 10).replaceAll('-', '')}-${item.referenceNumber.replace(/[^A-Z0-9]/gi, '').slice(-6)}`,
+  async function payQuotation(item) {
+    setStatus({ type: 'loading', message: 'Confirming payment...' })
+    try {
+      const isServiceItem = item.kind === 'Service'
+      const data = isServiceItem
+        ? await schemaApi.createServiceMockPayment(item.referenceNumber)
+        : await schemaApi.createMockPayment(item.referenceNumber)
+      const paid = withWorkflow((isServiceItem ? data.serviceRequest : data.quotation) || { ...item, status: 'Paid', payment: data.payment })
+      const receiptData = data.receipt ? receiptFromApi(data.receipt, paid) : buildReceipt({ ...paid, id: paid.referenceNumber, customer: user?.name || paid.customerName || 'Customer' }, data.payment || {})
+      updateItemInInbox({ ...paid, receipt: receiptData })
+      setReceipt(receiptData)
+      setPaymentConfirm(null)
+      setStatus({ type: 'idle', message: '' })
+    } catch (error) {
+      setStatus({ type: 'error', message: error.message || 'Unable to confirm payment.' })
     }
-    const receiptData = buildReceipt({ ...item, id: item.referenceNumber, customer: user?.name || item.customerName || 'Customer' }, payment)
-    updateLocalReference(item.referenceNumber, {
-      status: 'Paid',
-      payment: { status: 'Paid', ...payment, amount: item.quotation.total },
-      receipt: receiptData,
-    })
-    setReceipt(receiptData)
-    setPaymentConfirm(null)
   }
 
   if (!signedIn) {
@@ -235,6 +250,7 @@ function ProfileFilterPills({ filters, active, onChange, label }) {
 }
 
 function InboxCard({ item, title, isService = false, onView, onEdit, onConfirm, onPay, onReceipt, onCancel = null }) {
+  const scheduleNotice = scheduleUpdateNotice(item)
   return (
     <article className="inbox-card">
       <div>
@@ -243,11 +259,14 @@ function InboxCard({ item, title, isService = false, onView, onEdit, onConfirm, 
       </div>
       <p>Status: <b>{item.status}</b></p>
       {item.recurrenceFrequency && item.recurrenceFrequency !== 'One-time' && <p>Frequency: <b>{item.recurrenceFrequency}</b></p>}
-      {hasFinalSchedule(item) && (
-        <p className="profile-schedule-alert"><b>!</b> Schedule finalized: {formatSchedule(item.schedule?.date, item.schedule?.time)} / {assignedStaff(item)}</p>
+      {scheduleNotice ? (
+        <p className="profile-schedule-alert"><b>!</b> {scheduleNotice}</p>
+      ) : (
+        <>
+          {hasSchedule(item) && <p>{scheduleLabel(item)}: <b>{formatSchedule(item.schedule?.date || item.preferredDate, item.schedule?.time || item.preferredTime)}</b></p>}
+          {assignedStaff(item) && <p>Assigned staff: <b>{assignedStaff(item)}</b></p>}
+        </>
       )}
-      {hasSchedule(item) && <p>{scheduleLabel(item)}: <b>{formatSchedule(item.schedule?.date || item.preferredDate, item.schedule?.time || item.preferredTime)}</b></p>}
-      {assignedStaff(item) && <p>Assigned staff: <b>{assignedStaff(item)}</b></p>}
       <p>Total: <b>{formatPeso(item.quotation?.total || item.totalAmount)}</b></p>
       <p>{statusMessage(item)}</p>
       {item.payment?.status && <p>Payment: <b>{item.payment.status}</b></p>}
@@ -285,7 +304,7 @@ function CustomerActions({ item, isService = false, onView, onEdit, onConfirm, o
         <button className="btn secondary profile-action" type="button" onClick={() => onEdit(item)}>Edit quote</button>
       )}
       {item.status === 'Ready for Payment' && (
-        <button className="btn primary profile-action" type="button" onClick={() => onConfirm(item)}>Confirm quotation</button>
+        <button className="btn primary profile-action" type="button" onClick={() => onConfirm(item)}>{isService ? 'Confirm service quote' : 'Confirm quotation'}</button>
       )}
       {item.status === 'Customer Confirmed' && (
         <button className="btn primary profile-action" type="button" onClick={() => onPay(item)}>Proceed to payment</button>
@@ -491,7 +510,7 @@ function ReceiptDialog({ receipt, onClose }) {
             {receipt.charges?.map((charge) => (
               <div key={charge.id}>
                 <div>
-                  <strong>{charge.description || charge.type}</strong>
+                  <strong>{receiptChargeLabel(charge)}</strong>
                   <span>{charge.type} / Qty {charge.quantity} at {formatPeso(charge.unitPrice)}</span>
                 </div>
                 <span>{formatPeso(charge.subtotal)}</span>
@@ -525,11 +544,33 @@ function withWorkflow(item) {
     projectName: item.projectName || workflow.projectName || '',
     establishmentName: item.establishmentName || workflow.establishmentName || '',
     subject: item.serviceName || item.projectName || item.establishmentName || workflow.subject || 'Katala service',
-    status: mergedStatus(workflow.status, item.status),
-    quotation: normalizeQuotation(workflow.quotation, { ...base, totalAmount: item.totalAmount }),
-    payment: workflow.payment || item.payment,
+    status: mergedStatus(workflow.status, item.status, workflow.updatedAt, item.updatedAt),
+    schedule: workflow.schedule || { date: item.preferredDate || '', time: item.preferredTime || '', staff: item.staff || '' },
+    quotation: normalizeQuotation(workflow.quotation, { ...base, ...item, totalAmount: item.totalAmount }),
+    payment: item.payment || workflow.payment,
     receipt: workflow.receipt,
   }
+}
+
+function receiptFromApi(receipt, item) {
+  return {
+    receiptNumber: receipt.receiptNumber,
+    quotationReference: receipt.quotationReference,
+    requestReference: item.referenceNumber,
+    paidAt: receipt.paidAt,
+    paidAmount: receipt.totalAmount ?? item.quotation?.total,
+    customerName: receipt.customerName || item.customerName || 'Customer',
+    serviceDetails: receipt.projectName || item.subject || 'Katala service',
+    projectAddress: receipt.projectAddress || item.projectAddress || '',
+    charges: item.quotation?.charges || [],
+  }
+}
+
+function receiptChargeLabel(charge) {
+  if (String(charge.type || '').toLowerCase().includes('material') && charge.materialCode) {
+    return charge.materialCode
+  }
+  return charge.description || charge.serviceName || charge.type || 'Quoted item'
 }
 
 const peso = new Intl.NumberFormat('en-PH', {
@@ -550,10 +591,6 @@ function hasSchedule(item) {
   return Boolean(item.schedule?.date || item.schedule?.time || item.preferredDate || item.preferredTime)
 }
 
-function hasFinalSchedule(item) {
-  return !isCompleted(item) && Boolean(item.schedule?.date && item.schedule?.time && assignedStaff(item))
-}
-
 function hasAssignedSchedule(item) {
   return Boolean(assignedStaff(item) && (item.schedule?.date || item.schedule?.time))
 }
@@ -564,6 +601,13 @@ function scheduleLabel(item) {
 
 function assignedStaff(item) {
   return item.schedule?.staff || item.staff || ''
+}
+
+function scheduleUpdateNotice(item) {
+  if (!item.scheduleChangedAt && !item.scheduleChangeNotice) return ''
+  const schedule = formatSchedule(item.schedule?.date || item.preferredDate, item.schedule?.time || item.preferredTime)
+  const staff = assignedStaff(item)
+  return item.scheduleChangeNotice || `Schedule updated: ${[schedule, staff].filter(Boolean).join(' / ')}`
 }
 
 function quotationTitle(item) {
@@ -579,10 +623,19 @@ function displayStatus(status) {
   return value || 'Under Review'
 }
 
-function mergedStatus(localStatus, backendStatus) {
+function mergedStatus(localStatus, backendStatus, localUpdatedAt = '', backendUpdatedAt = '') {
   const local = displayStatus(localStatus)
   const backend = displayStatus(backendStatus)
+  if (local === 'Completed' && ['Ready for Payment', 'Customer Confirmed', 'Paid'].includes(backend)) return backend
+  if (isNewerOrSame(backendUpdatedAt, localUpdatedAt)) return backend
   return statusRank(local) > statusRank(backend) ? local : backend
+}
+
+function isNewerOrSame(primaryDate, secondaryDate) {
+  const primary = Date.parse(primaryDate || '')
+  const secondary = Date.parse(secondaryDate || '')
+  if (!Number.isFinite(primary) || !Number.isFinite(secondary)) return false
+  return primary >= secondary
 }
 
 function statusRank(status) {

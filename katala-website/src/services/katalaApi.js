@@ -1,6 +1,7 @@
-import { supabase } from './supabaseClient'
+import { isSupabaseConfigured, supabase } from './supabaseClient'
 
 const demoUserId = (import.meta.env.VITE_DEMO_USER_ID || '').trim()
+const useLocalAuth = ((import.meta.env.VITE_AUTH_PROVIDER || '').trim().toLowerCase() === 'local') || !isSupabaseConfigured
 const AUTH_KEY = 'katala-auth-v2'
 let currentSessionSnapshot = null
 let authReady = false
@@ -115,6 +116,13 @@ function saveSession(session) {
 
   // Keep only the minimum UI snapshot in memory. Do not persist the JWT.
   currentSessionSnapshot = nextSnapshot
+  if (useLocalAuth) {
+    try {
+      localStorage.setItem(AUTH_KEY, JSON.stringify(nextSnapshot))
+    } catch {
+      // Ignore storage restrictions.
+    }
+  }
 
   if (changed) emitAuthChanged()
 }
@@ -209,29 +217,49 @@ export function clearStoredSession() {
   if (hadSession) emitAuthChanged()
 }
 
-// Align the synchronous UI snapshot with the current in-memory Supabase session.
-supabase.auth.getSession().then(({ data }) => {
-  return syncSession(data?.session, { markReady: true })
-}).catch(() => {
-  clearStoredSession()
+if (useLocalAuth) {
+  try {
+    const stored = JSON.parse(localStorage.getItem(AUTH_KEY) || 'null')
+    if (stored?.token && (!stored.expiresAt || Date.now() < Number(stored.expiresAt) * 1000)) {
+      currentSessionSnapshot = stored
+    } else {
+      localStorage.removeItem(AUTH_KEY)
+    }
+  } catch {
+    localStorage.removeItem(AUTH_KEY)
+  }
   markAuthReady()
-})
+} else {
+  // Align the synchronous UI snapshot with the current in-memory Supabase session.
+  supabase.auth.getSession().then(({ data }) => {
+    return syncSession(data?.session, { markReady: true })
+  }).catch(() => {
+    clearStoredSession()
+    markAuthReady()
+  })
 
-supabase.auth.onAuthStateChange((_event, session) => {
-  syncSession(session).catch(() => {})
-})
+  supabase.auth.onAuthStateChange((_event, session) => {
+    syncSession(session).catch(() => {})
+  })
+}
 
 async function request(path, options = {}) {
   const headers = new Headers(options.headers || {})
   if (options.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json')
 
-  // Always ask Supabase for the latest access token so refreshed JWTs are sent to the API.
-  const { data: { session } = {} } = await supabase.auth.getSession()
-  if (session?.access_token) {
-    saveSession(session)
-    headers.set('Authorization', `Bearer ${session.access_token}`)
+  if (useLocalAuth && currentSessionSnapshot?.token) {
+    headers.set('Authorization', `Bearer ${currentSessionSnapshot.token}`)
+  } else if (!useLocalAuth) {
+    // Always ask Supabase for the latest access token so refreshed JWTs are sent to the API.
+    const { data: { session } = {} } = await supabase.auth.getSession()
+    if (session?.access_token) {
+      saveSession(session)
+      headers.set('Authorization', `Bearer ${session.access_token}`)
+    } else if (demoUserId) {
+      // Optional local-development fallback only.
+      headers.set('X-Development-User-Id', demoUserId)
+    }
   } else if (demoUserId) {
-    // Optional local-development fallback only.
     headers.set('X-Development-User-Id', demoUserId)
   }
 
@@ -247,6 +275,16 @@ async function request(path, options = {}) {
 
 export const authApi = {
   async signup(payload) {
+    if (useLocalAuth) {
+      const data = await request('/api/auth/signup', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      })
+      if (data.session) saveSession(data.session)
+      if (data.user) patchSessionUser(data.user)
+      return data
+    }
+
     const accountType = ['staff', 'customer'].includes(String(payload.accountType || '').toLowerCase())
       ? String(payload.accountType).toLowerCase()
       : 'customer'
@@ -298,6 +336,27 @@ export const authApi = {
   },
 
   async signin({ email, password, portal = 'customer' }) {
+    if (useLocalAuth) {
+      const data = await request('/api/auth/signin', {
+        method: 'POST',
+        body: JSON.stringify({ email, password, portal }),
+      })
+      if (!data.session) throw new Error('Unable to create a signed-in session.')
+      saveSession(data.session)
+      const user = patchSessionUser(data.user || sessionUser(data.session)) || sessionUser(data.session)
+      const requestedPortal = String(portal || 'customer').toLowerCase()
+      const role = user?.role || 'customer'
+      const allowed = requestedPortal === 'customer'
+        ? role === 'customer'
+        : role === requestedPortal || (requestedPortal === 'staff' && role === 'admin')
+      if (!allowed) {
+        clearStoredSession()
+        const portalLabel = role === 'admin' ? 'Administrator' : role.charAt(0).toUpperCase() + role.slice(1)
+        throw new Error(`This account is registered as ${portalLabel}. Choose the matching portal in "Sign in as".`)
+      }
+      return { ok: true, user, session: data.session }
+    }
+
     const { data, error } = await supabase.auth.signInWithPassword({ email, password })
     if (error) throw error
     if (!data.session) throw new Error('Unable to create a signed-in session.')
@@ -332,6 +391,11 @@ export const authApi = {
   },
 
   async signout() {
+    if (useLocalAuth) {
+      clearStoredSession()
+      return { ok: true }
+    }
+
     try {
       const { error } = await supabase.auth.signOut()
       if (error) throw error
@@ -350,12 +414,26 @@ export const authApi = {
   },
 
   async updatePassword(password) {
+    if (useLocalAuth) {
+      throw new Error('Password updates are not available for local XAMPP auth yet.')
+    }
+
     const { error } = await supabase.auth.updateUser({ password })
     if (error) throw error
     return { ok: true }
   },
 
   async session() {
+    if (useLocalAuth) {
+      return {
+        ok: true,
+        user: getStoredSession()?.user || null,
+        session: currentSessionSnapshot
+          ? { access_token: currentSessionSnapshot.token, expires_at: currentSessionSnapshot.expiresAt, user: currentSessionSnapshot.user }
+          : null,
+      }
+    }
+
     const { data, error } = await supabase.auth.getSession()
     if (error) throw error
     if (!data.session) {
@@ -373,6 +451,10 @@ export const authApi = {
   },
 
   async resendVerification(email) {
+    if (useLocalAuth) {
+      return { ok: true, email }
+    }
+
     const redirectUrl = `${window.location.origin}${window.location.pathname}`
     const { error } = await supabase.auth.resend({
       type: 'signup',
@@ -391,6 +473,10 @@ export const schemaApi = {
 
   listCatalogMaterials() {
     return request('/api/catalog/materials')
+  },
+
+  listCatalogServices() {
+    return request('/api/catalog/services')
   },
 
   createQuotation(payload) {
@@ -419,6 +505,30 @@ export const schemaApi = {
 
   createPaymongoCheckout(referenceNumber) {
     return request(`/api/quotations/${encodeURIComponent(referenceNumber)}/paymongo-checkout`, {
+      method: 'POST',
+    })
+  },
+
+  confirmQuotation(referenceNumber) {
+    return request(`/api/quotations/${encodeURIComponent(referenceNumber)}/confirm`, {
+      method: 'POST',
+    })
+  },
+
+  createMockPayment(referenceNumber) {
+    return request(`/api/quotations/${encodeURIComponent(referenceNumber)}/mock-payment`, {
+      method: 'POST',
+    })
+  },
+
+  confirmServiceRequest(referenceNumber) {
+    return request(`/api/service-requests/${encodeURIComponent(referenceNumber)}/confirm`, {
+      method: 'POST',
+    })
+  },
+
+  createServiceMockPayment(referenceNumber) {
+    return request(`/api/service-requests/${encodeURIComponent(referenceNumber)}/mock-payment`, {
       method: 'POST',
     })
   },
@@ -457,6 +567,10 @@ export const schemaApi = {
 
   listStaffRequests() {
     return request('/api/staff/work-queue')
+  },
+
+  listStaffMembers() {
+    return request('/api/staff/members')
   },
 
   updateStaffQuotation(referenceNumber, payload) {
@@ -521,6 +635,10 @@ export const schemaApi = {
     })
   },
 
+  getAdminDashboard() {
+    return request('/api/admin/dashboard')
+  },
+
   listAdminAccounts() {
     return request('/api/admin/accounts')
   },
@@ -534,10 +652,17 @@ export const schemaApi = {
 
   async downloadAdminDatabaseBackup() {
     const headers = new Headers()
-    const { data: { session } = {} } = await supabase.auth.getSession()
-    if (session?.access_token) {
-      saveSession(session)
-      headers.set('Authorization', `Bearer ${session.access_token}`)
+    if (useLocalAuth && currentSessionSnapshot?.token) {
+      headers.set('Authorization', `Bearer ${currentSessionSnapshot.token}`)
+    } else if (!useLocalAuth) {
+      const { data: { session } = {} } = await supabase.auth.getSession()
+      if (session?.access_token) {
+        saveSession(session)
+        headers.set('Authorization', `Bearer ${session.access_token}`)
+      } else if (demoUserId) {
+        headers.set('X-Development-User-Id', demoUserId)
+        headers.set('X-Development-Role', 'admin')
+      }
     } else if (demoUserId) {
       headers.set('X-Development-User-Id', demoUserId)
       headers.set('X-Development-Role', 'admin')

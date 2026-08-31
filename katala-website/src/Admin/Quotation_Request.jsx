@@ -4,31 +4,15 @@ import { schemaApi } from '../services/katalaApi';
 import { useAdminSearch } from './Layout';
 import { filterBySearch } from '../shared/search';
 
-function today() {
-  const now = new Date();
-  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
-}
-
 function QuotationRequests() {
   const [items, setItems] = useState([]);
   const [selected, setSelected] = useState(null);
-  const [actionDraft, setActionDraft] = useState({ status: 'Submitted', additionalCost: '', validUntil: '', remarks: '' });
   const [status, setStatus] = useState({ type: 'loading', message: 'Loading requests...' });
   const { normalizedQuery } = useAdminSearch();
 
   useEffect(() => {
     loadRequests();
   }, []);
-
-  useEffect(() => {
-    if (!selected) return;
-    setActionDraft({
-      status: selected.status || 'Submitted',
-      additionalCost: '',
-      validUntil: '',
-      remarks: '',
-    });
-  }, [selected]);
 
   async function loadRequests() {
     setStatus({ type: 'loading', message: 'Loading requests...' });
@@ -43,18 +27,6 @@ function QuotationRequests() {
     }
   }
 
-  async function updateSelected() {
-    if (!selected) return;
-    setStatus({ type: 'loading', message: 'Updating quotation...' });
-    try {
-      await schemaApi.updateStaffQuotation(selected.id, actionDraft);
-      await loadRequests();
-      setStatus({ type: 'success', message: 'Quotation updated.' });
-    } catch (error) {
-      setStatus({ type: 'error', message: error.message || 'Unable to update quotation.' });
-    }
-  }
-
   const pending = items.filter((item) => item.status === 'Submitted').length;
   const review = items.filter((item) => /review/i.test(item.status || '')).length;
   const quoted = items.filter((item) => /accepted|approved|payment|quoted/i.test(item.status || '')).length;
@@ -65,7 +37,7 @@ function QuotationRequests() {
       <div className="flex justify-between items-end mb-8">
         <div>
           <h1 className="text-2xl font-bold text-slate-900 mb-1">Quotation Requests</h1>
-          <p className="text-slate-500">Review customer quotation requests, set status, and prepare payment-ready quotations.</p>
+          <p className="text-slate-500">Review customer quotation requests submitted through the website. Pricing and workflow updates are handled by Staff.</p>
         </div>
         <button type="button" onClick={loadRequests} className="bg-white border border-slate-200 text-slate-700 px-4 py-2 rounded-lg font-bold flex items-center gap-2 hover:bg-slate-50 transition-colors">
           <RefreshCw className="w-4 h-4" /> Refresh
@@ -132,30 +104,28 @@ function QuotationRequests() {
             <h2 className="text-lg font-bold text-slate-900">{selected.id}</h2>
             <p className="text-sm text-slate-500 mb-5">{selected.customer} / {selected.email}</p>
 
-            <label className="block text-xs font-bold text-slate-500 uppercase mb-2">Status</label>
-            <select className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm mb-4" value={actionDraft.status} onChange={(event) => setActionDraft((current) => ({ ...current, status: event.target.value }))}>
-              <option>Submitted</option>
-              <option>Under Review</option>
-              <option>Accepted</option>
-              <option>Ready for Payment</option>
-              <option>Rejected</option>
-              <option>Cancelled</option>
-            </select>
-
-            <label className="block text-xs font-bold text-slate-500 uppercase mb-2">Additional cost</label>
-            <input className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm mb-4" type="number" min="0" step="0.01" placeholder="0.00" value={actionDraft.additionalCost} onChange={(event) => setActionDraft((current) => ({ ...current, additionalCost: event.target.value }))} />
-
-            <label className="block text-xs font-bold text-slate-500 uppercase mb-2">Valid until</label>
-            <input className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm mb-4" type="date" min={today()} value={actionDraft.validUntil} onChange={(event) => setActionDraft((current) => ({ ...current, validUntil: event.target.value }))} />
-
-            <label className="block text-xs font-bold text-slate-500 uppercase mb-2">Staff remarks</label>
-            <textarea className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm mb-4 min-h-24" value={actionDraft.remarks} onChange={(event) => setActionDraft((current) => ({ ...current, remarks: event.target.value }))} />
-
-            <button type="button" className="w-full bg-[#b3000c] text-white px-4 py-2 rounded-lg font-bold hover:bg-[#8b000a] transition-colors" onClick={updateSelected}>
-              Save quotation update
-            </button>
-
-            <p className="text-sm text-slate-600">{selected.customerRemarks || 'No customer remarks.'}</p>
+            <div className="space-y-4 text-sm">
+              <div>
+                <p className="text-xs font-bold text-slate-500 uppercase mb-1">Status</p>
+                <StatusPill status={selected.status} />
+              </div>
+              <div>
+                <p className="text-xs font-bold text-slate-500 uppercase mb-1">Project address</p>
+                <p className="text-slate-700 whitespace-pre-wrap">{selected.projectAddress || 'No address provided.'}</p>
+              </div>
+              <div>
+                <p className="text-xs font-bold text-slate-500 uppercase mb-1">Description</p>
+                <p className="text-slate-700 whitespace-pre-wrap">{selected.description || selected.projectDescription || 'No description provided.'}</p>
+              </div>
+              <div>
+                <p className="text-xs font-bold text-slate-500 uppercase mb-1">Customer remarks</p>
+                <p className="text-slate-700 whitespace-pre-wrap">{selected.customerRemarks || 'No customer remarks.'}</p>
+              </div>
+              <div>
+                <p className="text-xs font-bold text-slate-500 uppercase mb-1">Submitted</p>
+                <p className="text-slate-700">{selected.submittedAt ? new Date(selected.submittedAt).toLocaleString() : 'Not set'}</p>
+              </div>
+            </div>
           </aside>
         )}
       </div>

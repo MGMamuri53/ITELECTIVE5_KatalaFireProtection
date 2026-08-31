@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { CalendarClock, Eye, Plus, Save, Trash2 } from 'lucide-react';
+import { Eye, Plus, Save, Trash2 } from 'lucide-react';
 import { PageHeading, RefreshTableButton, StatusBadge } from '../StaffShared';
 import { useStaffSearch } from '../StaffLayout';
 import { schemaApi } from '../../services/katalaApi';
@@ -9,23 +9,26 @@ import {
   normalizeCharge,
   normalizeQuotation,
   overlayWorkflow,
-  staffMembers,
   today,
   upsertWorkflow,
   workflowItemsFromQueue,
 } from '../staffWorkflow';
 
-const reviewStatuses = ['Under Review', 'Quotation Draft', 'Ready for Payment'];
+const reviewStatuses = ['Under Review', 'Quotation Draft', 'Ready for Payment', 'Customer Confirmed'];
 const peso = new Intl.NumberFormat('en-PH', { style: 'currency', currency: 'PHP' });
 
 function WorkQueuePage() {
   const [queue, setQueue] = useState([]);
+  const [materials, setMaterials] = useState([]);
   const [activeRequest, setActiveRequest] = useState(null);
   const [status, setStatus] = useState({ type: 'loading', message: 'Loading customer requests...' });
   const { normalizedQuery } = useStaffSearch();
 
   useEffect(() => {
     loadQueue();
+    schemaApi.listCatalogMaterials()
+      .then((data) => setMaterials(data.materials || []))
+      .catch(() => setMaterials([]));
     const sync = () => loadQueue(false);
     window.addEventListener('katala-workflow-changed', sync);
     return () => window.removeEventListener('katala-workflow-changed', sync);
@@ -50,13 +53,18 @@ function WorkQueuePage() {
     if (options.confirmMessage && !window.confirm(options.confirmMessage)) return;
     setStatus({ type: 'loading', message: 'Saving workflow update...' });
     try {
-      const next = upsertWorkflow(item.id, patch);
+      let backendItemPatch = {};
       const backendPatch = backendStatusPatch(item, patch);
       if (backendPatch) {
-        if (item.kind === 'Quotation') await schemaApi.updateStaffQuotation(item.id, backendPatch);
+        if (item.kind === 'Quotation') {
+          const data = await schemaApi.updateStaffQuotation(item.id, backendPatch);
+          backendItemPatch = staffItemPatchFromQuotation(data.quotation);
+        }
         else await schemaApi.updateStaffServiceRequest(item.id, backendPatch);
       }
-      const merged = overlayWorkflow({ ...item, ...next });
+      const workflowPatch = workflowPatchForSave(patch, backendItemPatch);
+      const next = upsertWorkflow(item.id, workflowPatch);
+      const merged = overlayWorkflow({ ...item, ...backendItemPatch, ...next });
       setQueue((current) => current
         .map((row) => row.id === item.id ? merged : row)
         .filter((row) => reviewStatuses.includes(row.status)));
@@ -81,6 +89,7 @@ function WorkQueuePage() {
       {activeRequest && (
         <RequestModal
           item={activeRequest}
+          materials={materials}
           onClose={() => setActiveRequest(null)}
           onUpdate={updateRequest}
         />
@@ -92,15 +101,16 @@ function WorkQueuePage() {
 function RequestTable({ items, query, onViewDetails }) {
   return (
     <section className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
-      <div className="hidden md:grid grid-cols-[1fr_1.25fr_1.5fr_1fr_auto] gap-4 px-6 py-4 bg-slate-50/50 text-xs font-bold text-slate-500 uppercase">
-        <span>Reference</span><span>Customer</span><span>Request</span><span>Status</span><span>Action</span>
+      <div className="hidden md:grid grid-cols-[1fr_1.2fr_1.45fr_0.9fr_1fr_auto] gap-4 px-6 py-4 bg-slate-50/50 text-xs font-bold text-slate-500 uppercase">
+        <span>Reference</span><span>Customer</span><span>Request</span><span>Frequency</span><span>Status</span><span>Action</span>
       </div>
       <div className="divide-y divide-slate-100">
         {items.map((item) => (
-          <div key={item.id} className="grid grid-cols-1 md:grid-cols-[1fr_1.25fr_1.5fr_1fr_auto] gap-3 md:gap-4 px-5 md:px-6 py-5 items-start md:items-center bg-white hover:bg-slate-50/70">
+          <div key={item.id} className="grid grid-cols-1 md:grid-cols-[1fr_1.2fr_1.45fr_0.9fr_1fr_auto] gap-3 md:gap-4 px-5 md:px-6 py-5 items-start md:items-center bg-white hover:bg-slate-50/70">
             <span className="text-sm font-bold text-[#b3000c]">{item.id}</span>
             <span className="text-sm font-medium text-slate-900">{item.customer}<br /><small className="text-slate-500 font-normal">{item.email || item.contactNumber || 'No contact on file'}</small></span>
             <span className="text-sm text-slate-600">{item.subject}<br /><small className="text-slate-500">{item.kind} / {item.priority} priority</small></span>
+            <span className="text-sm text-slate-600">{item.kind === 'Service' ? item.recurrenceFrequency || 'One-time' : '-'}</span>
             <span><StatusBadge status={item.status} /></span>
             <button type="button" onClick={() => onViewDetails(item)} className="inline-flex items-center justify-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-sm font-bold text-slate-700 hover:bg-slate-50">
               <Eye className="w-4 h-4" /> View Details
@@ -113,7 +123,7 @@ function RequestTable({ items, query, onViewDetails }) {
   );
 }
 
-function RequestModal({ item, onClose, onUpdate }) {
+function RequestModal({ item, materials, onClose, onUpdate }) {
   return (
     <div className="fixed inset-0 z-[120] grid place-items-center bg-slate-900/40 p-4" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
       <section className="w-full max-w-5xl max-h-[calc(100vh-32px)] overflow-auto rounded-xl bg-white shadow-2xl border border-slate-200" role="dialog" aria-modal="true" aria-labelledby="staff-request-title">
@@ -127,7 +137,7 @@ function RequestModal({ item, onClose, onUpdate }) {
         </div>
         <div className="grid grid-cols-1 lg:grid-cols-[360px_minmax(0,1fr)] gap-6 p-5">
           <RequestDetails item={item} />
-          <QuotationPanel item={item} onUpdate={onUpdate} />
+          <QuotationPanel item={item} materials={materials} onUpdate={onUpdate} />
         </div>
       </section>
     </div>
@@ -143,8 +153,6 @@ function RequestDetails({ item }) {
     ['Complete service address', item.projectAddress || 'Not provided'],
     ['Requested service', item.subject || item.serviceName || item.kind],
     ['Service frequency', item.recurrenceFrequency || 'One-time'],
-    ['Preferred date', formatDate(item.preferredDate)],
-    ['Preferred time', formatTime(item.preferredTime)],
     ['Description', item.problemDescription || item.projectDescription || 'No description provided.'],
     ['Customer remarks', item.customerRemarks || 'No remarks provided.'],
     ['Request date', formatDateTime(item.submittedAt)],
@@ -168,26 +176,21 @@ function RequestDetails({ item }) {
   );
 }
 
-function QuotationPanel({ item, onUpdate }) {
+function QuotationPanel({ item, materials, onUpdate }) {
   const [draft, setDraft] = useState(() => normalizeQuotation(item.quotation, item));
-  const [scheduleDraft, setScheduleDraft] = useState(() => ({
-    date: item.schedule?.date || item.preferredDate || '',
-    time: item.schedule?.time || item.preferredTime || '',
-    staff: item.schedule?.staff || '',
-  }));
   const [formError, setFormError] = useState('');
 
   useEffect(() => {
     setDraft(normalizeQuotation(item.quotation, item));
-    setScheduleDraft({
-      date: item.schedule?.date || item.preferredDate || '',
-      time: item.schedule?.time || item.preferredTime || '',
-      staff: item.schedule?.staff || '',
-    });
     setFormError('');
   }, [item]);
 
   const totals = useMemo(() => normalizeQuotation(draft, item), [draft, item]);
+  const saveDraftStatus = item.status === 'Customer Confirmed'
+    ? 'Customer Confirmed'
+    : item.kind === 'Service'
+      ? 'Under Review'
+      : 'Quotation Draft';
 
   function updateCharge(id, patch) {
     setDraft((current) => ({
@@ -219,12 +222,23 @@ function QuotationPanel({ item, onUpdate }) {
     if (draft.charges.some((charge) => !Number.isInteger(Number(charge.quantity)) || Number(charge.quantity) < 1)) return 'Quantities must be whole numbers greater than zero.';
     if (draft.charges.some((charge) => Number(charge.unitPrice) < 0)) return 'Prices must be non-negative numbers.';
     if (totals.total <= 0) return 'Final total must be greater than zero before customer payment.';
-    if (!scheduleDraft.date || !scheduleDraft.time) return 'Add the proposed service date and time before customer payment.';
     return '';
   }
 
+  function chooseMaterial(charge, materialId) {
+    const material = materials.find((item) => item.variantId === materialId);
+    if (!material) return;
+    updateCharge(charge.id, {
+      materialCode: material.sku || '',
+      productVariantId: material.variantId || '',
+      description: [material.name, material.size ? `Size: ${material.size}` : '', material.model ? `Model: ${material.model}` : ''].filter(Boolean).join(' - '),
+      stockOnHand: material.stock,
+      unitPrice: charge.unitPrice || material.minPrice || 0,
+    });
+  }
+
   function saveQuotation(nextStatus) {
-    const error = nextStatus === 'Ready for Payment' ? validate() : '';
+    const error = ['Ready for Payment', 'Customer Confirmed'].includes(nextStatus) ? validate() : '';
     if (error) {
       setFormError(error);
       return;
@@ -232,11 +246,14 @@ function QuotationPanel({ item, onUpdate }) {
     onUpdate(item, {
       status: nextStatus,
       quotation: totals,
-      schedule: scheduleDraft,
       serviceType: item.serviceType || 'One-time',
     }, {
-      confirmMessage: nextStatus === 'Ready for Payment' ? `Mark ${item.id} as Ready for Payment? The customer will see this quotation and proposed schedule in their profile.` : '',
-      successMessage: nextStatus === 'Ready for Payment' ? 'Quotation and proposed schedule are ready for customer payment.' : 'Quotation draft saved.',
+      confirmMessage: nextStatus === 'Ready for Payment' ? `Mark ${item.id} as Ready for Payment? The customer will see this quotation in their profile.` : '',
+      successMessage: nextStatus === 'Ready for Payment'
+        ? 'Quotation is ready for customer payment.'
+        : nextStatus === 'Customer Confirmed'
+          ? 'Confirmed quotation updated.'
+          : 'Quotation draft saved.',
       closeOnSuccess: nextStatus === 'Ready for Payment',
     });
   }
@@ -267,7 +284,16 @@ function QuotationPanel({ item, onUpdate }) {
             </div>
             {charge.type === 'Materials charge' && (
               <div className="grid grid-cols-1 sm:grid-cols-[1.4fr_0.8fr] gap-3">
-                <Field label="Material code"><input value={charge.materialCode || ''} onChange={(e) => updateCharge(charge.id, { materialCode: e.target.value })} placeholder="Material or product code" /></Field>
+                <Field label="Material">
+                  <select value={charge.productVariantId || ''} onChange={(e) => chooseMaterial(charge, e.target.value)}>
+                    <option value="">Select material</option>
+                    {materials.map((material) => (
+                      <option key={material.variantId} value={material.variantId}>
+                        {[material.name, material.size, material.sku].filter(Boolean).join(' / ')}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
                 <Field label="Stock on hand"><input value={charge.stockOnHand ?? 'Not tracked'} readOnly /></Field>
               </div>
             )}
@@ -295,24 +321,6 @@ function QuotationPanel({ item, onUpdate }) {
       <Field label="Notes"><textarea rows="2" value={draft.notes} onChange={(e) => setDraft({ ...draft, notes: e.target.value })} /></Field>
       <Field label="Terms"><textarea rows="2" value={draft.terms} onChange={(e) => setDraft({ ...draft, terms: e.target.value })} /></Field>
 
-      <div className="rounded-lg border border-slate-200 p-4 grid gap-3">
-        <div className="flex items-center gap-2 text-slate-900">
-          <CalendarClock className="h-4 w-4 text-[#b3000c]" />
-          <h4 className="text-sm font-bold">Proposed service schedule</h4>
-        </div>
-        <p className="text-sm text-slate-500">This schedule will be shown to the customer before they confirm and pay.</p>
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-          <Field label="Schedule date"><input type="date" min={today()} value={scheduleDraft.date} onChange={(e) => setScheduleDraft({ ...scheduleDraft, date: e.target.value })} /></Field>
-          <Field label="Schedule time"><input type="time" value={scheduleDraft.time} onChange={(e) => setScheduleDraft({ ...scheduleDraft, time: e.target.value })} /></Field>
-          <Field label="Responsible staff">
-            <select value={scheduleDraft.staff} onChange={(e) => setScheduleDraft({ ...scheduleDraft, staff: e.target.value })}>
-              <option value="">Assign later</option>
-              {staffMembers.map((name) => <option key={name}>{name}</option>)}
-            </select>
-          </Field>
-        </div>
-      </div>
-
       <div className="rounded-lg bg-slate-50 border border-slate-200 p-4 space-y-2 text-sm">
         <PriceLine label="Subtotal" value={totals.subtotal} />
         <PriceLine label="Discount" value={-totals.discount} />
@@ -320,12 +328,14 @@ function QuotationPanel({ item, onUpdate }) {
       </div>
       {formError && <div className="rounded-lg bg-red-50 border border-red-100 text-red-700 px-3 py-2 text-sm">{formError}</div>}
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-        <button type="button" className="inline-flex items-center justify-center gap-2 bg-slate-800 text-white px-4 py-2 rounded-lg font-bold hover:bg-slate-700" onClick={() => saveQuotation('Quotation Draft')}>
-          <Save className="w-4 h-4" /> Save draft
+        <button type="button" className="inline-flex items-center justify-center gap-2 bg-slate-800 text-white px-4 py-2 rounded-lg font-bold hover:bg-slate-700" onClick={() => saveQuotation(saveDraftStatus)}>
+          <Save className="w-4 h-4" /> {item.status === 'Customer Confirmed' ? 'Save changes' : 'Save draft'}
         </button>
-        <button type="button" className="bg-[#b3000c] text-white px-4 py-2 rounded-lg font-bold hover:bg-[#8b000a]" onClick={() => saveQuotation('Ready for Payment')}>
-          Ready for Payment
-        </button>
+        {item.status !== 'Customer Confirmed' && (
+          <button type="button" className="bg-[#b3000c] text-white px-4 py-2 rounded-lg font-bold hover:bg-[#8b000a]" onClick={() => saveQuotation('Ready for Payment')}>
+            Ready for Payment
+          </button>
+        )}
       </div>
     </div>
   );
@@ -360,7 +370,7 @@ function Notice({ status }) {
 
 function backendStatusPatch(item, patch) {
   if (!patch.status && !patch.schedule) return null;
-  if (item.kind !== 'Quotation' && ['Quotation Draft', 'Ready for Payment', 'Customer Confirmed', 'Paid'].includes(patch.status)) {
+  if (item.kind !== 'Quotation' && ['Quotation Draft', 'Customer Confirmed', 'Paid'].includes(patch.status)) {
     return null;
   }
   const status = item.kind === 'Quotation'
@@ -369,13 +379,57 @@ function backendStatusPatch(item, patch) {
   const payload = { status, remarks: 'Updated from Staff workflow module' };
   if (item.kind === 'Quotation') {
     const quotation = patch.quotation || item.quotation;
-    payload.additionalCost = quotation?.total ?? item.totalAmount ?? '';
+    payload.additionalCost = quotation ? quotationAdjustment(quotation) : item.totalAmount ?? '';
+    payload.quotationTotal = quotation?.total ?? '';
+    payload.quotationDate = quotation?.quotationDate || '';
     payload.validUntil = quotation?.validUntil || '';
+    payload.charges = quotation?.charges || [];
+    payload.schedule = patch.schedule || item.schedule || {};
   } else {
+    const quotation = patch.quotation || item.quotation;
+    if (quotation?.total !== undefined) {
+      payload.quotedAmount = quotation.total;
+      payload.quotationTotal = quotation.total;
+      payload.charges = quotation.charges || [];
+    }
     payload.preferredDate = patch.schedule?.date || item.schedule?.date || item.preferredDate || '';
     payload.preferredTime = patch.schedule?.time || item.schedule?.time || item.preferredTime || '';
+    payload.recurrenceFrequency = patch.recurrenceFrequency || item.recurrenceFrequency || 'One-time';
   }
   return payload;
+}
+
+function quotationAdjustment(quotation) {
+  const materialSubtotal = (quotation.charges || [])
+    .filter((charge) => charge.type === 'Materials charge')
+    .reduce((sum, charge) => sum + Number(charge.subtotal || 0), 0);
+  return Number(quotation.total || 0) - materialSubtotal;
+}
+
+function workflowPatchForSave(patch, backendItemPatch) {
+  if (!backendItemPatch?.items?.length) return patch;
+  const { quotation, ...rest } = patch;
+  return {
+    ...rest,
+    quotation: normalizeQuotation(quotation, backendItemPatch),
+  };
+}
+
+function staffItemPatchFromQuotation(quotation) {
+  if (!quotation) return {};
+  return {
+    status: quotation.status,
+    subject: quotation.projectName || quotation.establishmentName || 'Product quotation',
+    projectAddress: quotation.projectAddress,
+    customerRemarks: quotation.customerRemarks,
+    quotationDate: quotation.quotationDate,
+    preferredDate: quotation.preferredDate,
+    preferredTime: quotation.preferredTime,
+    staff: quotation.staff,
+    additionalCost: quotation.additionalCost,
+    totalAmount: quotation.totalAmount,
+    items: quotation.items || [],
+  };
 }
 
 function backendQuotationStatus(status) {
@@ -386,14 +440,6 @@ function backendQuotationStatus(status) {
 
 function formatDateTime(value) {
   return value ? new Date(value).toLocaleString() : 'Not available';
-}
-
-function formatDate(value) {
-  return value ? new Date(value).toLocaleDateString() : 'Not provided';
-}
-
-function formatTime(value) {
-  return value || 'Not provided';
 }
 
 export default WorkQueuePage;

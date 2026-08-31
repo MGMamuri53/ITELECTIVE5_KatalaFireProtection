@@ -1,15 +1,28 @@
 import 'dotenv/config'
 import http from 'node:http'
-import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
+import { createHmac, randomBytes, randomUUID, scrypt as scryptCallback, timingSafeEqual } from 'node:crypto'
+import { promisify } from 'node:util'
 import pg from 'pg'
+import mysql from 'mysql2/promise'
 import { createClient } from '@supabase/supabase-js'
 
 const { Pool } = pg
+const scrypt = promisify(scryptCallback)
 const port = Number(process.env.PORT || 3001)
 const databaseUrl = (process.env.DATABASE_URL || '').trim()
 const useSsl = String(process.env.DATABASE_SSL || '').toLowerCase() === 'true'
+const mysqlConfig = {
+  host: (process.env.DB_HOST || '').trim(),
+  port: Number(process.env.DB_PORT || 3306),
+  database: (process.env.DB_NAME || '').trim(),
+  user: (process.env.DB_USER || '').trim(),
+  password: process.env.DB_PASSWORD || '',
+  timezone: (process.env.DB_TIMEZONE || '+08:00').trim(),
+}
+const useMysql = Boolean(mysqlConfig.host && mysqlConfig.database && mysqlConfig.user)
 const supabaseUrl = (process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || '').trim()
 const supabasePublishableKey = (process.env.SUPABASE_PUBLISHABLE_KEY || process.env.VITE_SUPABASE_PUBLISHABLE_KEY || '').trim()
+const authMode = (process.env.AUTH_PROVIDER || (useMysql ? 'local' : 'supabase')).trim().toLowerCase()
 const appOrigin = (process.env.APP_ORIGIN || '').trim().replace(/\/$/, '')
 const paymongoSecretKey = (process.env.PAYMONGO_SECRET_KEY || '').trim()
 const paymongoWebhookSecret = (process.env.PAYMONGO_WEBHOOK_SECRET || '').trim()
@@ -19,14 +32,150 @@ const paymongoMethods = (process.env.PAYMONGO_PAYMENT_METHODS || 'card,gcash,qrp
   .filter(Boolean)
 const paymongoPassOnFees = String(process.env.PAYMONGO_PASS_ON_FEES || '').toLowerCase() === 'true'
 
-const pool = databaseUrl
-  ? new Pool({
-      connectionString: databaseUrl,
-      ...(useSsl ? { ssl: { rejectUnauthorized: false } } : {}),
-    })
-  : null
+function mysqlPlaceholders(sql, params = []) {
+  const nextParams = []
+  let nextSql = sql
+    .replaceAll('public.', '')
+    .replace(/SELECT DISTINCT ON\s*\([^)]+\)/gi, 'SELECT')
+    .replace(/::(?:varchar|text|uuid|date|time|numeric|int|integer)\b/gi, '')
+    .replace(/COUNT\(\*\)::int/gi, 'COUNT(*)')
+    .replace(/row_to_json\(t\) AS row_data/gi, 'JSON_OBJECT() AS row_data')
+    .replace(/to_regclass\('tbl_paymenttransaction'\)/gi, "'tbl_paymenttransaction'")
+    .replace(/to_regclass\('public\.tbl_paymenttransaction'\)/gi, "'tbl_paymenttransaction'")
 
-const supabaseAuth = supabaseUrl && supabasePublishableKey
+  nextSql = nextSql.replace(/=\s*ANY\(\$(\d+)[^)]*\)/gi, (_match, indexText) => {
+    const values = Array.isArray(params[Number(indexText) - 1]) ? params[Number(indexText) - 1] : []
+    if (!values.length) return 'IN (NULL)'
+    nextParams.push(...values)
+    return `IN (${values.map(() => '?').join(', ')})`
+  })
+
+  nextSql = nextSql.replace(/\$(\d+)/g, (_match, indexText) => {
+    nextParams.push(params[Number(indexText) - 1])
+    return '?'
+  })
+
+  return { sql: nextSql, params: nextParams }
+}
+
+function mysqlResult(rows, info = {}) {
+  return {
+    rows: Array.isArray(rows) ? rows : [],
+    rowCount: Array.isArray(rows) ? rows.length : Number(info.affectedRows || 0),
+  }
+}
+
+function mysqlInsertUuid(sql) {
+  const match = sql.match(/^(\s*INSERT\s+INTO\s+(?:public\.)?)(\w+)(\s*\()([^)]*)(\)\s*)(VALUES|SELECT)\b/i)
+  if (!match) return sql
+  const idColumn = tableIdColumn(match[2])
+  if (!idColumn) return sql
+  const columns = match[4].split(',').map((item) => item.trim().toLowerCase())
+  if (columns.includes(idColumn.toLowerCase())) return sql
+
+  if (match[6].toUpperCase() === 'VALUES') {
+    return sql.replace(
+      /^(\s*INSERT\s+INTO\s+(?:public\.)?\w+\s*\()([^)]*)(\)\s*VALUES\s*\()/i,
+      `$1${idColumn}, $2$3UUID(), `,
+    )
+  }
+
+  return sql.replace(
+    /^(\s*INSERT\s+INTO\s+(?:public\.)?\w+\s*\()([^)]*)(\)\s*SELECT\s*)/i,
+    `$1${idColumn}, $2$3UUID(), `,
+  )
+}
+
+class MysqlConnection {
+  constructor(connection) {
+    this.connection = connection
+  }
+
+  async query(sql, params = []) {
+    const returning = sql.match(/\s+RETURNING\s+(.+)$/is)
+    const originalSql = sql
+    if (returning) sql = sql.slice(0, returning.index)
+    sql = mysqlInsertUuid(sql)
+    const converted = mysqlPlaceholders(sql, params)
+    const command = converted.sql.trim().toUpperCase()
+    const [rows, info] = ['BEGIN', 'COMMIT', 'ROLLBACK'].includes(command)
+      ? await this.connection.query(converted.sql)
+      : await this.connection.execute(converted.sql, converted.params)
+
+    if (returning) {
+      const selected = await this.selectReturning(originalSql, params, returning[1])
+      return selected || mysqlResult(rows, info)
+    }
+
+    return mysqlResult(rows, info)
+  }
+
+  async selectReturning(originalSql, params, returningColumns) {
+    const insertMatch = originalSql.match(/INSERT\s+INTO\s+(?:public\.)?(\w+)\s*\(([^)]+)\)/i)
+    if (insertMatch) {
+      const table = insertMatch[1]
+      const columns = insertMatch[2].split(',').map((item) => item.trim())
+      const identityColumns = [`v_${table.replace(/^tbl_/, '')}id`, 'v_userid', 'v_referencenumber', 'v_emailaddress']
+      const identityColumn = identityColumns.find((column) => columns.includes(column))
+      if (identityColumn) {
+        const value = params[columns.indexOf(identityColumn)]
+        return await this.query(`SELECT ${returningColumns} FROM ${table} WHERE ${identityColumn} = $1 LIMIT 1`, [value])
+      }
+    }
+
+    const updateMatch = originalSql.match(/UPDATE\s+(?:public\.)?(\w+)\s+SET\s+[\s\S]+?\s+WHERE\s+([\s\S]+?)\s+RETURNING/i)
+    if (updateMatch) {
+      const table = updateMatch[1]
+      const whereClause = updateMatch[2]
+      const placeholderCount = (whereClause.match(/\$\d+/g) || []).length
+      const ordered = [...whereClause.matchAll(/\$(\d+)/g)].map((match) => params[Number(match[1]) - 1])
+      const whereParams = ordered.length ? ordered : params.slice(-placeholderCount)
+      return await this.query(`SELECT ${returningColumns} FROM ${table} WHERE ${whereClause} LIMIT 1`, whereParams)
+    }
+
+    return null
+  }
+
+  async release() {
+    this.connection.release()
+  }
+}
+
+class MysqlPool {
+  constructor(config) {
+    this.pool = mysql.createPool({
+      ...config,
+      waitForConnections: true,
+      connectionLimit: 10,
+      namedPlaceholders: false,
+      timezone: config.timezone || '+08:00',
+    })
+  }
+
+  async query(sql, params = []) {
+    const connection = await this.pool.getConnection()
+    try {
+      return await new MysqlConnection(connection).query(sql, params)
+    } finally {
+      connection.release()
+    }
+  }
+
+  async connect() {
+    return new MysqlConnection(await this.pool.getConnection())
+  }
+}
+
+const pool = useMysql
+  ? new MysqlPool(mysqlConfig)
+  : databaseUrl
+    ? new Pool({
+        connectionString: databaseUrl,
+        ...(useSsl ? { ssl: { rejectUnauthorized: false } } : {}),
+      })
+    : null
+
+const supabaseAuth = authMode !== 'local' && supabaseUrl && supabasePublishableKey
   ? createClient(supabaseUrl, supabasePublishableKey, {
       auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
     })
@@ -102,6 +251,12 @@ function nullable(value, max = 500) {
   return result || null
 }
 
+function nullableMoney(value) {
+  if (value === '' || value === null || value === undefined) return null
+  const number = Number(value)
+  return Number.isFinite(number) && number >= 0 ? toMoneyNumber(number) : null
+}
+
 function isUuid(value) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
 }
@@ -139,8 +294,8 @@ async function readRawBody(req, maxSize = 64_000) {
   return Buffer.concat(chunks)
 }
 
-async function readBody(req) {
-  const raw = (await readRawBody(req)).toString('utf8')
+async function readBody(req, maxSize) {
+  const raw = (await readRawBody(req, maxSize)).toString('utf8')
   return raw ? JSON.parse(raw) : {}
 }
 
@@ -273,6 +428,200 @@ function authUserNames(user) {
   }
 }
 
+function signLocalToken(user) {
+  const secret = process.env.APP_SESSION_SECRET || 'katala-local-development-secret'
+  const payload = Buffer.from(JSON.stringify({
+    sub: user.id,
+    email: user.email,
+    exp: Math.floor(Date.now() / 1000) + 60 * 60 * 8,
+  })).toString('base64url')
+  const signature = createHmac('sha256', secret).update(payload).digest('base64url')
+  return `${payload}.${signature}`
+}
+
+function verifyLocalToken(token) {
+  if (!token || !token.includes('.')) return null
+  const [payload, signature] = token.split('.')
+  const secret = process.env.APP_SESSION_SECRET || 'katala-local-development-secret'
+  const expected = createHmac('sha256', secret).update(payload).digest('base64url')
+  const provided = Buffer.from(signature)
+  const calculated = Buffer.from(expected)
+  if (provided.length !== calculated.length || !timingSafeEqual(provided, calculated)) return null
+  const data = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'))
+  if (!data?.sub || Number(data.exp || 0) <= Math.floor(Date.now() / 1000)) return null
+  return data
+}
+
+async function hashPassword(password) {
+  const salt = randomBytes(16).toString('hex')
+  const hash = (await scrypt(String(password), salt, 64)).toString('hex')
+  return `${salt}:${hash}`
+}
+
+async function verifyPassword(password, stored) {
+  const [salt, hash] = String(stored || '').split(':')
+  if (!salt || !hash) return false
+  const attempted = (await scrypt(String(password), salt, 64)).toString('hex')
+  const provided = Buffer.from(hash, 'hex')
+  const calculated = Buffer.from(attempted, 'hex')
+  return provided.length === calculated.length && timingSafeEqual(provided, calculated)
+}
+
+function localSessionResponse(user, token) {
+  return {
+    ok: true,
+    session: {
+      access_token: token,
+      expires_at: Math.floor(Date.now() / 1000) + 60 * 60 * 8,
+      user: {
+        id: user.id,
+        email: user.email,
+        user_metadata: {
+          first_name: user.firstName,
+          last_name: user.lastName,
+          role: user.role,
+          account_type: user.role,
+          company_name: user.companyName,
+          contact_number: user.contactNumber,
+        },
+      },
+    },
+    user: {
+      userId: user.id,
+      email: user.email,
+      name: [user.firstName, user.lastName].filter(Boolean).join(' ') || user.email,
+      role: user.role,
+      companyName: user.companyName || null,
+      contactNumber: user.contactNumber || null,
+      accountStatus: user.accountStatus,
+    },
+  }
+}
+
+async function localAuthUserByEmail(email, client = pool) {
+  const result = await client.query(
+    `SELECT la.v_userid, la.v_passwordhash,
+            u.v_firstname, u.v_lastname, u.v_emailaddress, u.v_contactnumber,
+            u.v_accountstatus, u.v_companyname,
+            r.v_rolename AS role_name
+       FROM local_auth_accounts la
+       JOIN tbl_user u ON u.v_userid = la.v_userid
+       LEFT JOIN tbl_userrole ur ON ur.v_userid = u.v_userid
+       LEFT JOIN tbl_role r ON r.v_roleid = ur.v_roleid
+      WHERE LOWER(u.v_emailaddress) = LOWER($1)
+      LIMIT 1`,
+    [email],
+  )
+  const row = result.rows[0]
+  if (!row) return null
+  return {
+    id: row.v_userid,
+    email: row.v_emailaddress,
+    firstName: row.v_firstname,
+    lastName: row.v_lastname,
+    contactNumber: row.v_contactnumber,
+    companyName: row.v_companyname,
+    accountStatus: normalizeAccountStatus(row.v_accountstatus),
+    role: normalizePortalRole(row.role_name) || 'customer',
+    passwordHash: row.v_passwordhash,
+  }
+}
+
+async function localAuthUserById(userId, client = pool) {
+  const result = await client.query(
+    `SELECT u.v_userid, u.v_firstname, u.v_lastname, u.v_emailaddress, u.v_contactnumber,
+            u.v_accountstatus, u.v_companyname,
+            r.v_rolename AS role_name
+       FROM tbl_user u
+       LEFT JOIN tbl_userrole ur ON ur.v_userid = u.v_userid
+       LEFT JOIN tbl_role r ON r.v_roleid = ur.v_roleid
+      WHERE u.v_userid = $1
+      LIMIT 1`,
+    [userId],
+  )
+  const row = result.rows[0]
+  if (!row) return null
+  return {
+    id: row.v_userid,
+    email: row.v_emailaddress,
+    firstName: row.v_firstname,
+    lastName: row.v_lastname,
+    contactNumber: row.v_contactnumber,
+    companyName: row.v_companyname,
+    accountStatus: normalizeAccountStatus(row.v_accountstatus),
+    role: normalizePortalRole(row.role_name) || 'customer',
+  }
+}
+
+async function handleLocalSignup(req, res) {
+  if (authMode !== 'local') return sendJson(res, 404, { error: 'Local auth is not enabled.' })
+  const body = await readBody(req)
+  const email = clean(body.email, 180).toLowerCase()
+  const password = String(body.password || '')
+  const firstName = clean(body.firstName, 120)
+  const lastName = clean(body.lastName, 120)
+  const accountType = configuredPortalRole(email) || publicSignupRole(body.accountType)
+  const status = accountType === 'staff' && !configuredPortalRole(email) ? 'Pending' : 'Active'
+
+  if (!firstName || !lastName || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return sendJson(res, 400, { error: 'Complete the required signup fields.' })
+  }
+  if (password.length < 6) return sendJson(res, 400, { error: 'Password must be at least 6 characters.' })
+
+  const userId = randomUUID()
+  const passwordHash = await hashPassword(password)
+  const result = await transaction(async (client) => {
+    const existing = await localAuthUserByEmail(email, client)
+    if (existing) return { exists: true }
+    await client.query(
+      `INSERT INTO tbl_user
+        (v_userid, v_firstname, v_lastname, v_emailaddress, v_contactnumber,
+         v_accountstatus, v_companyname, v_jobtitle, v_industry, v_companyaddress)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+      [
+        userId,
+        firstName,
+        lastName,
+        email,
+        nullable(body.contactNumber, 40),
+        status,
+        nullable(body.companyName, 160),
+        nullable(body.jobTitle, 120),
+        nullable(body.industry, 120),
+        nullable(body.companyAddress, 500),
+      ],
+    )
+    await client.query(
+      'INSERT INTO local_auth_accounts (v_userid, v_emailaddress, v_passwordhash) VALUES ($1, $2, $3)',
+      [userId, email, passwordHash],
+    )
+    await assignSingleRole(client, userId, accountType)
+    return await localAuthUserById(userId, client)
+  })
+
+  if (result.exists) return sendJson(res, 409, { error: 'An account already exists for this email.' })
+  const token = signLocalToken(result)
+  return sendJson(res, 201, {
+    ...localSessionResponse(result, token),
+    accountType,
+    requiresApproval: accountType === 'staff',
+    requiresEmailConfirmation: false,
+  })
+}
+
+async function handleLocalSignin(req, res) {
+  if (authMode !== 'local') return sendJson(res, 404, { error: 'Local auth is not enabled.' })
+  const body = await readBody(req)
+  const email = clean(body.email, 180).toLowerCase()
+  const password = String(body.password || '')
+  const user = await localAuthUserByEmail(email)
+  if (!user || !(await verifyPassword(password, user.passwordHash))) {
+    return sendJson(res, 401, { error: 'Invalid email or password.' })
+  }
+  const token = signLocalToken(user)
+  return sendJson(res, 200, localSessionResponse(user, token))
+}
+
 async function ensureAuthUserProfile(client, user) {
   if (!client || !isUuid(user?.id)) return null
   const existing = await userAccountRecord(user.id, client)
@@ -303,6 +652,25 @@ async function ensureAuthUserProfile(client, user) {
 
 async function getAuthenticatedUser(req) {
   const token = getBearerToken(req)
+  if (authMode === 'local') {
+    const localToken = verifyLocalToken(token)
+    if (localToken?.sub) {
+      const user = await localAuthUserById(localToken.sub).catch(() => null)
+      if (user) {
+        const configuredRole = configuredPortalRole(user.email)
+        return {
+          id: user.id,
+          email: user.email,
+          name: [user.firstName, user.lastName].filter(Boolean).join(' '),
+          accountStatus: configuredRole ? 'Active' : user.accountStatus,
+          companyName: user.companyName || null,
+          contactNumber: user.contactNumber || null,
+          role: configuredRole || user.role,
+        }
+      }
+    }
+  }
+
   if (token && supabaseAuth) {
     const { data, error } = await supabaseAuth.auth.getUser(token)
     if (!error && data?.user?.id) {
@@ -459,7 +827,7 @@ async function handleUpdateOwnProfile(req, res, user) {
 function requireDatabase(res) {
   if (pool) return true
   sendJson(res, 503, {
-    error: 'Database is not connected yet. Set DATABASE_URL when you are ready. This server does not create or migrate any table.',
+    error: 'Database is not connected yet. Set DB_HOST, DB_NAME, and DB_USER for XAMPP/MySQL.',
   })
   return false
 }
@@ -490,11 +858,19 @@ async function assignSingleRole(client, userId, role) {
   const roleId = await ensureRole(client, normalized)
   if (!roleId) throw new Error('ROLE_NOT_FOUND')
   await client.query('DELETE FROM public.tbl_userrole WHERE v_userid = $1', [userId])
-  await client.query(
-    `INSERT INTO public.tbl_userrole (v_userid, v_roleid)
-     VALUES ($1, $2)`,
-    [userId, roleId],
-  )
+  if (useMysql) {
+    await client.query(
+      `INSERT INTO tbl_userrole (v_userroleid, v_userid, v_roleid)
+       VALUES ($1, $2, $3)`,
+      [randomUUID(), userId, roleId],
+    )
+  } else {
+    await client.query(
+      `INSERT INTO public.tbl_userrole (v_userid, v_roleid)
+       VALUES ($1, $2)`,
+      [userId, roleId],
+    )
+  }
 }
 
 function publicSignupRole(value) {
@@ -618,6 +994,79 @@ async function handleListAccounts(req, res) {
   return sendJson(res, 200, { ok: true, ...(await listAccounts()) })
 }
 
+async function handleAdminDashboard(req, res) {
+  const [accounts, materials, services, quotes, serviceRequests, payments] = await Promise.all([
+    pool.query(`SELECT COUNT(*)::int AS total FROM public.tbl_user`),
+    pool.query(`SELECT COUNT(*)::int AS total FROM public.tbl_productvariant WHERE v_isactive = TRUE`),
+    pool.query(`SELECT COUNT(*)::int AS total FROM public.tbl_service WHERE v_isactive = TRUE`),
+    pool.query(`SELECT COUNT(*)::int AS total FROM public.tbl_quotation`),
+    pool.query(`SELECT COUNT(*)::int AS total FROM public.tbl_servicerequest`),
+    tableExists('tbl_paymenttransaction')
+      ? pool.query(`SELECT COUNT(*)::int AS total, COALESCE(SUM(v_amount), 0) AS paid_total FROM public.tbl_paymenttransaction WHERE v_status = 'Paid'`)
+      : Promise.resolve({ rows: [{ total: 0, paid_total: 0 }] }),
+  ])
+
+  const recentQuotes = await pool.query(
+    `SELECT v_referencenumber, v_projectname, v_quotationstatus, v_submittedat
+       FROM public.tbl_quotation
+      ORDER BY v_updatedat DESC
+      LIMIT 5`,
+  )
+  const recentServices = await pool.query(
+    `SELECT sr.v_referencenumber, s.v_servicename, sr.v_requeststatus, sr.v_submittedat
+       FROM public.tbl_servicerequest sr
+       JOIN public.tbl_service s ON s.v_serviceid = sr.v_serviceid
+      ORDER BY sr.v_updatedat DESC
+      LIMIT 5`,
+  )
+
+  return sendJson(res, 200, {
+    ok: true,
+    metrics: {
+      managedAccounts: Number(accounts.rows[0]?.total || 0),
+      materialSkus: Number(materials.rows[0]?.total || 0),
+      activeServices: Number(services.rows[0]?.total || 0),
+      quotationRequests: Number(quotes.rows[0]?.total || 0),
+      serviceRequests: Number(serviceRequests.rows[0]?.total || 0),
+      paidPayments: Number(payments.rows[0]?.total || 0),
+      paidRevenue: toMoneyNumber(payments.rows[0]?.paid_total || 0),
+    },
+    recentActivity: [
+      ...recentQuotes.rows.map((row) => ({
+        referenceNumber: row.v_referencenumber,
+        title: row.v_projectname || 'Product quotation',
+        type: 'Quotation',
+        status: row.v_quotationstatus,
+        submittedAt: row.v_submittedat,
+      })),
+      ...recentServices.rows.map((row) => ({
+        referenceNumber: row.v_referencenumber,
+        title: row.v_servicename || 'Service request',
+        type: 'Service',
+        status: row.v_requeststatus,
+        submittedAt: row.v_submittedat,
+      })),
+    ].sort((a, b) => new Date(b.submittedAt || 0) - new Date(a.submittedAt || 0)).slice(0, 6),
+  })
+}
+
+async function handleListStaffMembers(req, res) {
+  const { accounts } = await listAccounts()
+  const members = accounts
+    .filter((account) => account.role === 'staff' && account.status === 'Active')
+    .map((account) => ({
+      id: account.id,
+      name: account.assignedStaffName || account.name,
+      accountName: account.name,
+      email: account.email,
+      designation: account.staffDesignation || '',
+      department: account.department || '',
+    }))
+    .filter((member) => member.name)
+    .sort((a, b) => a.name.localeCompare(b.name))
+  return sendJson(res, 200, { ok: true, members })
+}
+
 async function handleUpdateAccount(req, res, userId) {
   if (!isUuid(userId)) return sendJson(res, 400, { error: 'Invalid account id.' })
   const body = await readBody(req)
@@ -693,6 +1142,14 @@ function csvCell(value) {
 }
 
 async function existingTables(tableNames) {
+  if (useMysql) {
+    const found = new Set()
+    for (const tableName of tableNames) {
+      if (await tableExists(tableName)) found.add(tableName)
+    }
+    return found
+  }
+
   const result = await pool.query(
     `SELECT table_name
        FROM information_schema.tables
@@ -731,6 +1188,7 @@ async function handleDatabaseBackup(req, res) {
 }
 
 async function paymentTableExists(client = pool) {
+  if (useMysql) return await tableExists('tbl_paymenttransaction', client)
   const result = await client.query("SELECT to_regclass('public.tbl_paymenttransaction') AS table_name")
   return Boolean(result.rows[0]?.table_name)
 }
@@ -739,7 +1197,7 @@ function requirePaymentTableReady(res) {
   return paymentTableExists().then((ready) => {
     if (ready) return true
     sendJson(res, 503, {
-      error: 'Payment transactions are not configured yet. Run database/paymongo_transactions.sql in Supabase, then try again.',
+      error: 'Payment transactions are not configured yet. Import the latest XAMPP MySQL schema, then try again.',
     })
     return false
   })
@@ -761,15 +1219,32 @@ async function transaction(work) {
 }
 
 const columnCache = new Map()
+const tableCache = new Map()
+
+async function tableExists(tableName, client = pool) {
+  if (tableCache.has(tableName)) return tableCache.get(tableName)
+  const result = await client.query(
+     `SELECT EXISTS (
+       SELECT 1
+         FROM information_schema.tables
+        WHERE table_schema = $2
+          AND table_name = $1
+     ) AS table_exists`,
+    [tableName, useMysql ? mysqlConfig.database : 'public'],
+  )
+  const exists = Boolean(result.rows[0]?.table_exists ?? result.rows[0]?.exists)
+  tableCache.set(tableName, exists)
+  return exists
+}
 
 async function tableColumns(tableName, client = pool) {
   if (columnCache.has(tableName)) return columnCache.get(tableName)
   const result = await client.query(
     `SELECT column_name
        FROM information_schema.columns
-      WHERE table_schema = 'public'
+      WHERE table_schema = $2
         AND table_name = $1`,
-    [tableName],
+    [tableName, useMysql ? mysqlConfig.database : 'public'],
   )
   const columns = new Set(result.rows.map((row) => row.column_name))
   columnCache.set(tableName, columns)
@@ -785,8 +1260,37 @@ function optionalSelect(columns, names, alias, fallback = 'NULL') {
   return column ? `${column} AS ${alias}` : `${fallback} AS ${alias}`
 }
 
+function tableIdColumn(table) {
+  return {
+    tbl_role: 'v_roleid',
+    tbl_user: 'v_userid',
+    tbl_userrole: 'v_userroleid',
+    tbl_useraddress: 'v_useraddressid',
+    tbl_productcategory: 'v_productcategoryid',
+    tbl_product: 'v_productid',
+    tbl_productvariant: 'v_productvariantid',
+    tbl_servicecategory: 'v_servicecategoryid',
+    tbl_service: 'v_serviceid',
+    tbl_project: 'v_projectid',
+    tbl_quotation: 'v_quotationid',
+    tbl_quotationproductitem: 'v_quotationproductitemid',
+    tbl_quotationserviceitem: 'v_quotationserviceitemid',
+    tbl_quotationstatushistory: 'v_quotationstatushistoryid',
+    tbl_paymenttransaction: 'v_paymenttransactionid',
+    tbl_servicerequest: 'v_servicerequestid',
+    tbl_servicerequeststatushistory: 'v_servicerequeststatushistoryid',
+    tbl_appointment: 'v_appointmentid',
+    tbl_serviceassignment: 'v_serviceassignmentid',
+    tbl_attachment: 'v_attachmentid',
+    tbl_notification: 'v_notificationid',
+  }[table] || ''
+}
+
 function buildInsert(table, values) {
-  const entries = Object.entries(values).filter(([, value]) => value !== undefined)
+  const nextValues = { ...values }
+  const idColumn = useMysql ? tableIdColumn(table) : ''
+  if (idColumn && nextValues[idColumn] === undefined) nextValues[idColumn] = randomUUID()
+  const entries = Object.entries(nextValues).filter(([, value]) => value !== undefined)
   const columns = entries.map(([key]) => key)
   const params = entries.map((_, index) => `$${index + 1}`)
   return {
@@ -818,30 +1322,43 @@ function materialStatus(row) {
 async function listMaterials(client = pool) {
   const productColumns = await tableColumns('tbl_product', client)
   const variantColumns = await tableColumns('tbl_productvariant', client)
-  const categoryExpr = productColumns.has('v_productcategory')
-    ? 'p.v_productcategory'
-    : productColumns.has('v_category')
-      ? 'p.v_category'
-      : productColumns.has('v_producttype')
-        ? 'p.v_producttype'
-        : 'NULL'
+  const categoryTableExists = await tableExists('tbl_productcategory', client)
+  const categoryExpr = categoryTableExists
+    ? 'pc.v_categoryname'
+    : productColumns.has('v_productcategory')
+      ? 'p.v_productcategory'
+      : productColumns.has('v_category')
+        ? 'p.v_category'
+        : productColumns.has('v_producttype')
+          ? 'p.v_producttype'
+          : 'NULL'
   const stockExpr = firstColumn(variantColumns, ['v_stockquantity', 'v_stockqty', 'v_quantityonhand', 'v_quantity'])
   const reorderExpr = firstColumn(variantColumns, ['v_reorderlevel', 'v_reorderpoint'])
+  const productImageExpr = optionalSelect(productColumns, ['v_productimageurl', 'v_imageurl', 'v_image_url'], 'product_image_url')
+  const variantImageExpr = optionalSelect(variantColumns, ['v_variantimageurl', 'v_productimageurl', 'v_imageurl', 'v_image_url'], 'variant_image_url')
+  const minPriceColumn = firstColumn(variantColumns, ['v_minprice', 'v_min_price', 'v_pricemin', 'v_price_min'])
+  const maxPriceColumn = firstColumn(variantColumns, ['v_maxprice', 'v_max_price', 'v_pricemax', 'v_price_max'])
 
   const result = await client.query(
     `SELECT p.v_productid,
             p.v_productname,
             ${categoryExpr} AS category,
+            ${productImageExpr},
             pv.v_productvariantid,
             pv.v_productcode,
             pv.v_productmodel,
             pv.v_productsize,
             pv.v_productunit,
+            ${optionalSelect(variantColumns, ['v_variantdescription', 'v_description'], 'variant_description')},
+            ${variantImageExpr},
             pv.v_isactive AS is_active,
             ${stockExpr ? `pv.${stockExpr}` : 'NULL'} AS stock_quantity,
-            ${reorderExpr ? `pv.${reorderExpr}` : 'NULL'} AS reorder_level
+            ${reorderExpr ? `pv.${reorderExpr}` : 'NULL'} AS reorder_level,
+            ${minPriceColumn ? `pv.${minPriceColumn}` : 'NULL'} AS min_price,
+            ${maxPriceColumn ? `pv.${maxPriceColumn}` : 'NULL'} AS max_price
        FROM public.tbl_productvariant pv
        JOIN public.tbl_product p ON p.v_productid = pv.v_productid
+       ${categoryTableExists ? 'LEFT JOIN public.tbl_productcategory pc ON pc.v_productcategoryid = p.v_productcategoryid' : ''}
       ORDER BY p.v_productname, pv.v_productmodel, pv.v_productsize`,
   )
 
@@ -854,8 +1371,12 @@ async function listMaterials(client = pool) {
     model: row.v_productmodel || '',
     size: row.v_productsize || '',
     unit: row.v_productunit || '',
+    description: row.variant_description || '',
+    imageUrl: row.variant_image_url || row.product_image_url || '',
     stock: row.stock_quantity === null || row.stock_quantity === undefined ? null : Number(row.stock_quantity),
     reorderLevel: row.reorder_level === null || row.reorder_level === undefined ? null : Number(row.reorder_level),
+    minPrice: row.min_price === null || row.min_price === undefined ? null : Number(row.min_price),
+    maxPrice: row.max_price === null || row.max_price === undefined ? null : Number(row.max_price),
     active: Boolean(row.is_active),
     status: materialStatus(row),
   }))
@@ -863,16 +1384,27 @@ async function listMaterials(client = pool) {
 
 async function listServices(client = pool) {
   const serviceColumns = await tableColumns('tbl_service', client)
+  const categoryTableExists = await tableExists('tbl_servicecategory', client)
+  const categoryColumn = firstColumn(serviceColumns, ['v_servicecategory', 'v_category'])
+  const durationColumn = firstColumn(serviceColumns, ['v_estimatedduration', 'v_duration'])
+  const descriptionColumn = firstColumn(serviceColumns, ['v_servicedescription', 'v_description'])
+  const imageColumn = firstColumn(serviceColumns, ['v_serviceimageurl', 'v_imageurl', 'v_image_url'])
+  const minPriceColumn = firstColumn(serviceColumns, ['v_minprice', 'v_min_price', 'v_pricemin', 'v_price_min'])
+  const maxPriceColumn = firstColumn(serviceColumns, ['v_maxprice', 'v_max_price', 'v_pricemax', 'v_price_max'])
   const result = await client.query(
-    `SELECT v_serviceid,
-            v_servicecode,
-            v_servicename,
-            v_isactive,
-            ${optionalSelect(serviceColumns, ['v_servicecategory', 'v_category'], 'category')},
-            ${optionalSelect(serviceColumns, ['v_estimatedduration', 'v_duration'], 'duration')},
-            ${optionalSelect(serviceColumns, ['v_servicedescription', 'v_description'], 'description')}
-       FROM public.tbl_service
-      ORDER BY v_servicename`,
+    `SELECT s.v_serviceid,
+            s.v_servicecode,
+            s.v_servicename,
+            s.v_isactive,
+            ${categoryTableExists ? 'sc.v_categoryname AS category' : categoryColumn ? `s.${categoryColumn} AS category` : 'NULL AS category'},
+            ${durationColumn ? `s.${durationColumn}` : 'NULL'} AS duration,
+            ${descriptionColumn ? `s.${descriptionColumn}` : 'NULL'} AS description,
+            ${imageColumn ? `s.${imageColumn}` : 'NULL'} AS image_url,
+            ${minPriceColumn ? `s.${minPriceColumn}` : 'NULL'} AS min_price,
+            ${maxPriceColumn ? `s.${maxPriceColumn}` : 'NULL'} AS max_price
+       FROM public.tbl_service s
+       ${categoryTableExists ? 'LEFT JOIN public.tbl_servicecategory sc ON sc.v_servicecategoryid = s.v_servicecategoryid' : ''}
+      ORDER BY s.v_servicename`,
   )
 
   return result.rows.map((row) => ({
@@ -882,6 +1414,9 @@ async function listServices(client = pool) {
     category: row.category || 'Service',
     duration: row.duration || '',
     description: row.description || '',
+    imageUrl: row.image_url || '',
+    minPrice: row.min_price === null || row.min_price === undefined ? null : Number(row.min_price),
+    maxPrice: row.max_price === null || row.max_price === undefined ? null : Number(row.max_price),
     active: Boolean(row.v_isactive),
     status: row.v_isactive ? 'Active' : 'Draft',
   }))
@@ -1051,6 +1586,7 @@ function validateQuotationItems(body) {
 
   const items = []
   for (const raw of source) {
+    const productVariantId = clean(raw?.productVariantId, 80)
     const productName = clean(raw?.productName, 180)
     const productModel = nullable(raw?.productModel, 180)
     const productSize = nullable(raw?.productSize, 120)
@@ -1058,8 +1594,9 @@ function validateQuotationItems(body) {
     const quantity = Number(raw?.quantity)
 
     if (!productName) return { error: 'A product name is missing.' }
+    if (productVariantId && !isUuid(productVariantId)) return { error: 'A selected material id is invalid.' }
     if (!Number.isInteger(quantity) || quantity < 1 || quantity > 999) return { error: 'Product quantity must be between 1 and 999.' }
-    items.push({ productName, productModel, productSize, itemDescription, quantity })
+    items.push({ productVariantId, productName, productModel, productSize, itemDescription, quantity })
   }
   return { items }
 }
@@ -1082,30 +1619,80 @@ async function ensureUserExists(client, userId) {
 }
 
 async function resolveProductVariant(client, item) {
-  const params = [item.productName]
-  const conditions = [
+  if (item.productVariantId) {
+    const byId = await client.query(
+      `SELECT pv.v_productvariantid, pv.v_productcode, pv.v_productmodel, pv.v_productsize
+         FROM public.tbl_productvariant pv
+         JOIN public.tbl_product p ON p.v_productid = pv.v_productid
+        WHERE pv.v_productvariantid = $1
+          AND p.v_isactive = TRUE
+          AND pv.v_isactive = TRUE
+        LIMIT 1`,
+      [item.productVariantId],
+    )
+    if (byId.rowCount) return byId.rows[0]
+  }
+
+  const baseParams = [item.productName]
+  const baseConditions = [
     'LOWER(p.v_productname) = LOWER($1)',
     'p.v_isactive = TRUE',
     'pv.v_isactive = TRUE',
   ]
 
   if (item.productModel) {
-    params.push(item.productModel)
-    conditions.push(`LOWER(COALESCE(pv.v_productmodel, '')) = LOWER($${params.length})`)
+    baseParams.push(item.productModel)
+    baseConditions.push(`LOWER(COALESCE(pv.v_productmodel, '')) = LOWER($${baseParams.length})`)
   }
   if (item.productSize) {
-    params.push(item.productSize)
-    conditions.push(`LOWER(COALESCE(pv.v_productsize, '')) = LOWER($${params.length})`)
+    baseParams.push(item.productSize)
+    baseConditions.push(`LOWER(COALESCE(pv.v_productsize, '')) = LOWER($${baseParams.length})`)
   }
 
-  const result = await client.query(
+  let result = await client.query(
     `SELECT pv.v_productvariantid, pv.v_productcode, pv.v_productmodel, pv.v_productsize
        FROM public.tbl_productvariant pv
        JOIN public.tbl_product p ON p.v_productid = pv.v_productid
-      WHERE ${conditions.join(' AND ')}
+      WHERE ${baseConditions.join(' AND ')}
       LIMIT 2`,
-    params,
+    baseParams,
   )
+
+  if (!result.rowCount && item.productModel) {
+    const fallbackConditions = [
+      'LOWER(p.v_productname) = LOWER($1)',
+      'p.v_isactive = TRUE',
+      'pv.v_isactive = TRUE',
+      'LOWER(COALESCE(pv.v_productcode, \'\')) = LOWER($2)',
+    ]
+    const fallbackParams = [item.productName, item.productModel]
+    if (item.productSize) {
+      fallbackParams.push(item.productSize)
+      fallbackConditions.push(`LOWER(COALESCE(pv.v_productsize, '')) = LOWER($${fallbackParams.length})`)
+    }
+    result = await client.query(
+      `SELECT pv.v_productvariantid, pv.v_productcode, pv.v_productmodel, pv.v_productsize
+         FROM public.tbl_productvariant pv
+         JOIN public.tbl_product p ON p.v_productid = pv.v_productid
+        WHERE ${fallbackConditions.join(' AND ')}
+        LIMIT 2`,
+      fallbackParams,
+    )
+  }
+
+  if (!result.rowCount && item.productModel && item.productSize) {
+    result = await client.query(
+      `SELECT pv.v_productvariantid, pv.v_productcode, pv.v_productmodel, pv.v_productsize
+         FROM public.tbl_productvariant pv
+         JOIN public.tbl_product p ON p.v_productid = pv.v_productid
+        WHERE LOWER(p.v_productname) = LOWER($1)
+          AND LOWER(COALESCE(pv.v_productsize, '')) = LOWER($2)
+          AND p.v_isactive = TRUE
+          AND pv.v_isactive = TRUE
+        LIMIT 2`,
+      [item.productName, item.productSize],
+    )
+  }
 
   if (result.rowCount !== 1) {
     const error = new Error(result.rowCount === 0 ? 'PRODUCT_VARIANT_NOT_FOUND' : 'PRODUCT_VARIANT_AMBIGUOUS')
@@ -1174,6 +1761,28 @@ function toMoneyNumber(value) {
   return Number.isFinite(number) ? Math.round(number * 100) / 100 : 0
 }
 
+function dateOnly(value) {
+  if (!value) return ''
+  if (value instanceof Date) {
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Asia/Manila',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).formatToParts(value)
+    const date = Object.fromEntries(parts.map((part) => [part.type, part.value]))
+    return `${date.year}-${date.month}-${date.day}`
+  }
+  const text = String(value)
+  return text.includes('T') ? text.slice(0, 10) : text
+}
+
+function timeOnly(value) {
+  if (!value) return ''
+  const text = String(value)
+  return text.slice(0, 5)
+}
+
 function toCentavos(value) {
   return Math.round(toMoneyNumber(value) * 100)
 }
@@ -1216,7 +1825,6 @@ function quotationTotals(row, items) {
 function quotationDto(row, items = [], payment = null) {
   const totals = quotationTotals(row, items)
   const quotationStatus = String(row.v_quotationstatus || '').toLowerCase()
-  const payableStatuses = ['accepted', 'approved', 'ready for payment', 'for payment']
 
   return {
     referenceNumber: row.v_referencenumber,
@@ -1226,15 +1834,19 @@ function quotationDto(row, items = [], payment = null) {
     projectAddress: row.v_projectaddress,
     customerRemarks: row.v_customerremarks,
     status: row.v_quotationstatus,
-    validUntil: row.v_validuntil,
+    quotationDate: dateOnly(row.v_quotationdate),
+    validUntil: dateOnly(row.v_validuntil),
+    preferredDate: dateOnly(row.v_scheduleddate),
+    preferredTime: timeOnly(row.v_scheduledtime),
+    staff: row.v_assignedstaff,
     submittedAt: row.v_submittedat,
     updatedAt: row.v_updatedat,
+    completedAt: row.v_completedat,
     additionalCost: totals.additionalCost,
     subtotal: totals.subtotal,
     totalAmount: totals.totalAmount,
-    canPay: payableStatuses.includes(quotationStatus)
-      && totals.totalAmount > 0
-      && items.every((item) => item.unitPrice !== null && item.unitPrice !== undefined),
+    canPay: isPayableQuotationStatus(quotationStatus)
+      && totals.totalAmount > 0,
     paymongoConfigured: Boolean(paymongoSecretKey),
     payment: paymentStatusDto(payment),
     items,
@@ -1261,10 +1873,11 @@ async function handleCreateQuotation(req, res, userId) {
 
     const quotation = await client.query(
       `INSERT INTO public.tbl_quotation
-        (v_userid, v_referencenumber, v_projectname, v_establishmentname, v_projectdescription, v_projectaddress, v_customerremarks)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
+        (v_quotationid, v_userid, v_referencenumber, v_projectname, v_establishmentname, v_projectdescription, v_projectaddress, v_customerremarks)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
        RETURNING *`,
       [
+        randomUUID(),
         userId,
         referenceNumber,
         fields.projectName,
@@ -1279,17 +1892,17 @@ async function handleCreateQuotation(req, res, userId) {
     for (const item of resolvedItems) {
       await client.query(
         `INSERT INTO public.tbl_quotationproductitem
-          (v_quotationid, v_productvariantid, v_quantity, v_itemdescription, v_unitprice)
-         VALUES ($1, $2, $3, $4, $5)`,
-        [quotationId, item.variant.v_productvariantid, item.quantity, item.itemDescription, null],
+          (v_quotationproductitemid, v_quotationid, v_productvariantid, v_quantity, v_itemdescription, v_unitprice)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [randomUUID(), quotationId, item.variant.v_productvariantid, item.quantity, item.itemDescription, null],
       )
     }
 
     await client.query(
       `INSERT INTO public.tbl_quotationstatushistory
-        (v_quotationid, v_updatedbyuserid, v_status, v_statusremarks)
-       VALUES ($1, $2, 'Submitted', 'Submitted by customer for staff review')`,
-      [quotationId, userId],
+        (v_quotationstatushistoryid, v_quotationid, v_updatedbyuserid, v_status, v_statusremarks)
+       VALUES ($1, $2, $3, 'Submitted', 'Submitted by customer for staff review')`,
+      [randomUUID(), quotationId, userId],
     )
 
     return quotation.rows[0]
@@ -1313,7 +1926,8 @@ async function loadQuotation(userId, referenceNumber) {
   if (!quotation.rowCount) return null
 
   const items = await pool.query(
-    `SELECT qpi.v_quantity, qpi.v_unitprice, qpi.v_itemdescription,
+    `SELECT qpi.v_quotationproductitemid, qpi.v_quantity, qpi.v_unitprice, qpi.v_itemdescription,
+            pv.v_productvariantid,
             pv.v_productcode, pv.v_productmodel, pv.v_productsize, pv.v_productunit,
             p.v_productname
        FROM public.tbl_quotationproductitem qpi
@@ -1327,6 +1941,8 @@ async function loadQuotation(userId, referenceNumber) {
   return quotationDto(
     quotation.rows[0],
     items.rows.map((item) => ({
+      quotationProductItemId: item.v_quotationproductitemid,
+      productVariantId: item.v_productvariantid,
       productName: item.v_productname,
       productCode: item.v_productcode,
       productModel: item.v_productmodel,
@@ -1660,6 +2276,145 @@ async function handleCreatePaymongoCheckout(req, res, userId, referenceNumber) {
   })
 }
 
+async function resolveCategoryId(client, table, idColumn, nameColumn, value, fallback) {
+  if (!(await tableExists(table, client))) return null
+  const categoryName = clean(value || fallback, 120) || fallback
+  const existing = await client.query(
+    `SELECT ${idColumn}
+       FROM public.${table}
+      WHERE LOWER(${nameColumn}) = LOWER($1)
+      LIMIT 1`,
+    [categoryName],
+  )
+  if (existing.rowCount) return existing.rows[0][idColumn]
+
+  const insert = buildInsert(table, {
+    [nameColumn]: categoryName,
+    v_categorydescription: null,
+    v_isactive: true,
+  })
+  const created = await client.query(insert.sql, insert.params)
+  return created.rows[0][idColumn]
+}
+
+function imageInput(value) {
+  const text = typeof value === 'string' ? value.trim() : ''
+  if (!text) return null
+  return text.slice(0, 900_000)
+}
+
+async function handleConfirmQuotation(req, res, userId, referenceNumber) {
+  const result = await transaction(async (client) => {
+    const updated = await client.query(
+      `UPDATE public.tbl_quotation
+          SET v_quotationstatus = 'Customer Confirmed',
+              v_updatedat = NOW()
+        WHERE v_userid = $1
+          AND v_referencenumber = $2
+          AND LOWER(v_quotationstatus) IN ('accepted', 'approved', 'ready for payment', 'for payment', 'customer confirmed')
+        RETURNING *`,
+      [userId, referenceNumber],
+    )
+    if (!updated.rowCount) return null
+    await client.query(
+      `INSERT INTO public.tbl_quotationstatushistory
+        (v_quotationid, v_updatedbyuserid, v_status, v_statusremarks)
+       VALUES ($1, $2, 'Customer Confirmed', 'Confirmed by customer')`,
+      [updated.rows[0].v_quotationid, userId],
+    )
+    return updated.rows[0]
+  })
+
+  if (!result) return sendJson(res, 409, { error: 'Quotation is not ready for customer confirmation.' })
+  const quotation = await loadQuotation(userId, referenceNumber)
+  return sendJson(res, 200, { ok: true, quotation })
+}
+
+async function handleMockQuotationPayment(req, res, userId, referenceNumber) {
+  if (!(await requirePaymentTableReady(res))) return
+  const result = await transaction(async (client) => {
+    await ensureUserExists(client, userId)
+    const quotation = await loadPayableQuotation(client, userId, referenceNumber)
+    if (!quotation) return { notFound: true }
+    if (!quotation.canPay) return { notPayable: quotation }
+
+    const existing = await client.query(
+      `SELECT *
+         FROM public.tbl_paymenttransaction
+        WHERE v_userid = $1
+          AND v_quotationid = (
+            SELECT v_quotationid FROM public.tbl_quotation WHERE v_userid = $1 AND v_referencenumber = $2 LIMIT 1
+          )
+        ORDER BY v_createdat DESC
+        LIMIT 1`,
+      [userId, referenceNumber],
+    )
+    if (existing.rowCount && existing.rows[0].v_status === 'Paid') return { alreadyPaid: existing.rows[0] }
+
+    const paymentReference = existing.rows[0]?.v_referencenumber || transactionReference(referenceNumber)
+    const receipt = existing.rows[0]?.v_receiptnumber || receiptNumber()
+    const payment = existing.rowCount
+      ? await client.query(
+          `UPDATE public.tbl_paymenttransaction
+              SET v_status = 'Paid',
+                  v_amount = $2,
+                  v_paymentmethod = 'Mock payment',
+                  v_receiptnumber = COALESCE(v_receiptnumber, $3),
+                  v_paidat = COALESCE(v_paidat, NOW()),
+                  v_updatedat = NOW()
+            WHERE v_paymenttransactionid = $1
+            RETURNING *`,
+          [existing.rows[0].v_paymenttransactionid, quotation.totalAmount, receipt],
+        )
+      : await client.query(
+          `INSERT INTO public.tbl_paymenttransaction
+            (v_quotationid, v_userid, v_referencenumber, v_status, v_amount, v_currency, v_paymentmethod, v_receiptnumber, v_paidat)
+           SELECT v_quotationid, v_userid, $3, 'Paid', $4, 'PHP', 'Mock payment', $5, NOW()
+             FROM public.tbl_quotation
+            WHERE v_userid = $1
+              AND v_referencenumber = $2
+           RETURNING *`,
+          [userId, referenceNumber, paymentReference, quotation.totalAmount, receipt],
+        )
+
+    await client.query(
+      `UPDATE public.tbl_quotation
+          SET v_quotationstatus = 'Paid',
+              v_updatedat = NOW()
+        WHERE v_userid = $1
+          AND v_referencenumber = $2`,
+      [userId, referenceNumber],
+    )
+    await client.query(
+      `INSERT INTO public.tbl_quotationstatushistory
+        (v_quotationid, v_updatedbyuserid, v_status, v_statusremarks)
+       SELECT v_quotationid, $1, 'Paid', 'Mock payment confirmed by customer'
+         FROM public.tbl_quotation
+        WHERE v_userid = $1
+          AND v_referencenumber = $2`,
+      [userId, referenceNumber],
+    )
+
+    if (payment.rows[0]) return { payment: payment.rows[0] }
+    const savedPayment = await client.query(
+      `SELECT *
+         FROM public.tbl_paymenttransaction
+        WHERE v_referencenumber = $1
+        LIMIT 1`,
+      [paymentReference],
+    )
+    return { payment: savedPayment.rows[0] || null }
+  })
+
+  if (result.notFound) return sendJson(res, 404, { error: 'Quotation not found.' })
+  if (result.notPayable) return sendJson(res, 409, { error: 'This quotation is not ready for payment yet.', quotation: result.notPayable })
+  const payment = result.payment || result.alreadyPaid
+  if (!payment) return sendJson(res, 500, { error: 'Payment was saved but could not be reloaded.' })
+  const quotation = await loadQuotation(userId, referenceNumber)
+  const receipt = await loadReceipt(userId, payment.v_referencenumber)
+  return sendJson(res, 200, { ok: true, quotation, payment: paymentStatusDto(payment), receipt })
+}
+
 function verifyPaymongoSignature(rawBody, signatureHeader) {
   if (!paymongoWebhookSecret) return process.env.NODE_ENV !== 'production'
   if (!signatureHeader) return false
@@ -1853,12 +2608,13 @@ async function handleCreateServiceRequest(req, res, userId) {
 
     const inserted = await client.query(
       `INSERT INTO public.tbl_servicerequest
-        (v_userid, v_serviceid, v_useraddressid, v_referencenumber, v_projectname, v_establishmentname,
+        (v_servicerequestid, v_userid, v_serviceid, v_useraddressid, v_referencenumber, v_projectname, v_establishmentname,
          v_contactperson, v_contactnumber, v_problemdescription, v_projectaddress, v_preferreddate,
          v_preferredtime, v_prioritylevel, v_customerremarks)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
        RETURNING *`,
       [
+        randomUUID(),
         userId,
         service.v_serviceid,
         values.userAddressId,
@@ -1878,9 +2634,9 @@ async function handleCreateServiceRequest(req, res, userId) {
 
     await client.query(
       `INSERT INTO public.tbl_servicerequeststatushistory
-        (v_servicerequestid, v_updatedbyuserid, v_status, v_statusremarks)
-       VALUES ($1, $2, 'Submitted', 'Submitted by customer')`,
-      [inserted.rows[0].v_servicerequestid, userId],
+        (v_servicerequeststatushistoryid, v_servicerequestid, v_updatedbyuserid, v_status, v_statusremarks)
+       VALUES ($1, $2, $3, 'Submitted', 'Submitted by customer')`,
+      [randomUUID(), inserted.rows[0].v_servicerequestid, userId],
     )
 
     return inserted.rows[0]
@@ -1895,8 +2651,14 @@ async function handleCreateServiceRequest(req, res, userId) {
 }
 
 function serviceRequestDto(row, serviceName) {
+  const quotedAmount = row.v_quotedamount === null || row.v_quotedamount === undefined ? null : toMoneyNumber(row.v_quotedamount)
+  const paymentStatus = row.v_paymentstatus || (row.v_requeststatus === 'Paid' ? 'Paid' : '')
+  const receipt = paymentStatus === 'Paid' && row.v_receiptnumber
+    ? serviceReceiptDto(row, serviceName, quotedAmount)
+    : null
   return {
     referenceNumber: row.v_referencenumber,
+    kind: 'Service',
     serviceName,
     projectName: row.v_projectname,
     establishmentName: row.v_establishmentname,
@@ -1904,28 +2666,160 @@ function serviceRequestDto(row, serviceName) {
     contactNumber: row.v_contactnumber,
     problemDescription: row.v_problemdescription,
     projectAddress: row.v_projectaddress,
-    preferredDate: row.v_preferreddate,
-    preferredTime: row.v_preferredtime,
+    preferredDate: dateOnly(row.v_preferreddate),
+    preferredTime: timeOnly(row.v_preferredtime),
     recurrenceFrequency: recurrenceFromRemarks(row.v_customerremarks),
     priorityLevel: row.v_prioritylevel,
     customerRemarks: stripRecurrenceFromRemarks(row.v_customerremarks),
     status: row.v_requeststatus,
     submittedAt: row.v_submittedat,
     updatedAt: row.v_updatedat,
+    completedAt: row.v_completedat,
+    totalAmount: quotedAmount,
+    quotation: quotedAmount !== null ? serviceQuotationDto(row, serviceName, quotedAmount) : null,
+    payment: paymentStatus ? {
+      referenceNumber: row.v_referencenumber,
+      status: paymentStatus,
+      amount: quotedAmount,
+      currency: 'PHP',
+      paymentMethod: row.v_paymentmethod || 'Mock payment',
+      receiptNumber: row.v_receiptnumber || '',
+      paidAt: row.v_paidat || null,
+    } : null,
+    receipt,
   }
+}
+
+function serviceQuotationDto(row, serviceName, amount) {
+  return {
+    referenceNumber: `SQUO-${row.v_referencenumber}`,
+    quotationDate: dateOnly(row.v_updatedat) || dateOnly(row.v_submittedat) || manilaNowParts().date,
+    subtotal: amount,
+    discount: 0,
+    total: amount,
+    charges: [{
+      id: `service-${row.v_servicerequestid || row.v_referencenumber}`,
+      type: 'Service charge',
+      serviceName,
+      description: serviceName || 'Reviewed service',
+      quantity: 1,
+      unitPrice: amount,
+      subtotal: amount,
+    }],
+  }
+}
+
+function serviceReceiptDto(row, serviceName, amount) {
+  return {
+    receiptNumber: row.v_receiptnumber,
+    quotationReference: `SQUO-${row.v_referencenumber}`,
+    requestReference: row.v_referencenumber,
+    paidAt: row.v_paidat,
+    paidAmount: amount,
+    customerName: customerName(row),
+    serviceDetails: serviceName || row.v_projectname || 'Katala service',
+    projectAddress: row.v_projectaddress || '',
+    charges: serviceQuotationDto(row, serviceName, amount).charges,
+  }
+}
+
+function isPayableQuotationStatus(status) {
+  return ['accepted', 'approved', 'ready for payment', 'for payment', 'customer confirmed'].includes(String(status || '').toLowerCase())
 }
 
 async function loadServiceRequest(userId, referenceNumber) {
   const result = await pool.query(
-    `SELECT sr.*, s.v_servicename
+    `SELECT sr.*, s.v_servicename, u.v_firstname, u.v_lastname, u.v_companyname, u.v_emailaddress
        FROM public.tbl_servicerequest sr
        JOIN public.tbl_service s ON s.v_serviceid = sr.v_serviceid
+       JOIN public.tbl_user u ON u.v_userid = sr.v_userid
       WHERE sr.v_userid = $1 AND sr.v_referencenumber = $2
       LIMIT 1`,
     [userId, referenceNumber],
   )
   if (!result.rowCount) return null
   return serviceRequestDto(result.rows[0], result.rows[0].v_servicename)
+}
+
+async function handleConfirmServiceRequest(req, res, userId, referenceNumber) {
+  const result = await transaction(async (client) => {
+    const columns = await tableColumns('tbl_servicerequest', client)
+    const amountColumn = columns.has('v_quotedamount') ? 'v_quotedamount' : ''
+    if (!amountColumn) return { missingMigration: true }
+    const updated = await client.query(
+      `UPDATE public.tbl_servicerequest
+          SET v_requeststatus = 'Customer Confirmed',
+              v_updatedat = NOW()
+        WHERE v_userid = $1
+          AND v_referencenumber = $2
+          AND LOWER(v_requeststatus) IN ('accepted', 'approved', 'ready for payment', 'for payment', 'customer confirmed')
+          AND COALESCE(v_quotedamount, 0) > 0
+        RETURNING *`,
+      [userId, referenceNumber],
+    )
+    if (!updated.rowCount) return null
+    await client.query(
+      `INSERT INTO public.tbl_servicerequeststatushistory
+        (v_servicerequeststatushistoryid, v_servicerequestid, v_updatedbyuserid, v_status, v_statusremarks)
+       VALUES ($1, $2, $3, 'Customer Confirmed', 'Confirmed by customer')`,
+      [randomUUID(), updated.rows[0].v_servicerequestid, userId],
+    )
+    return updated.rows[0]
+  })
+
+  if (result?.missingMigration) return sendJson(res, 500, { error: 'Service payment fields are missing. Import database/katala_service_payment_migration.sql in phpMyAdmin.' })
+  if (!result) return sendJson(res, 409, { error: 'Service request is not ready for customer confirmation.' })
+  const serviceRequest = await loadServiceRequest(userId, referenceNumber)
+  return sendJson(res, 200, { ok: true, serviceRequest })
+}
+
+async function handleMockServicePayment(req, res, userId, referenceNumber) {
+  const result = await transaction(async (client) => {
+    const columns = await tableColumns('tbl_servicerequest', client)
+    if (!columns.has('v_quotedamount') || !columns.has('v_paymentstatus') || !columns.has('v_receiptnumber') || !columns.has('v_paidat')) {
+      return { missingMigration: true }
+    }
+    const request = await client.query(
+      `SELECT *
+         FROM public.tbl_servicerequest
+        WHERE v_userid = $1
+          AND v_referencenumber = $2
+        LIMIT 1`,
+      [userId, referenceNumber],
+    )
+    if (!request.rowCount) return { notFound: true }
+    const row = request.rows[0]
+    const amount = toMoneyNumber(row.v_quotedamount)
+    if (!isPayableQuotationStatus(row.v_requeststatus) || amount <= 0) return { notPayable: true }
+    if (row.v_paymentstatus === 'Paid' && row.v_receiptnumber) return { paid: row }
+
+    const receipt = row.v_receiptnumber || receiptNumber()
+    const updated = await client.query(
+      `UPDATE public.tbl_servicerequest
+          SET v_requeststatus = 'Paid',
+              v_paymentstatus = 'Paid',
+              v_receiptnumber = COALESCE(v_receiptnumber, $3),
+              v_paidat = COALESCE(v_paidat, NOW()),
+              v_updatedat = NOW()
+        WHERE v_userid = $1
+          AND v_referencenumber = $2
+        RETURNING *`,
+      [userId, referenceNumber, receipt],
+    )
+    await client.query(
+      `INSERT INTO public.tbl_servicerequeststatushistory
+        (v_servicerequeststatushistoryid, v_servicerequestid, v_updatedbyuserid, v_status, v_statusremarks)
+       VALUES ($1, $2, $3, 'Paid', 'Mock payment confirmed by customer')`,
+      [randomUUID(), updated.rows[0].v_servicerequestid, userId],
+    )
+    return { paid: updated.rows[0] }
+  })
+
+  if (result?.missingMigration) return sendJson(res, 500, { error: 'Service payment fields are missing. Import database/katala_service_payment_migration.sql in phpMyAdmin.' })
+  if (result?.notFound) return sendJson(res, 404, { error: 'Service request not found.' })
+  if (result?.notPayable) return sendJson(res, 409, { error: 'This service request is not ready for payment yet.' })
+  const serviceRequest = await loadServiceRequest(userId, referenceNumber)
+  return sendJson(res, 200, { ok: true, serviceRequest, payment: serviceRequest.payment, receipt: serviceRequest.receipt })
 }
 
 async function handleGetServiceRequest(req, res, userId, referenceNumber) {
@@ -2013,9 +2907,9 @@ async function handleCancelServiceRequest(req, res, userId, referenceNumber) {
     )
     await client.query(
       `INSERT INTO public.tbl_servicerequeststatushistory
-        (v_servicerequestid, v_updatedbyuserid, v_status, v_statusremarks)
-       VALUES ($1, $2, 'Cancelled', 'Cancelled by customer')`,
-      [row.v_servicerequestid, userId],
+        (v_servicerequeststatushistoryid, v_servicerequestid, v_updatedbyuserid, v_status, v_statusremarks)
+       VALUES ($1, $2, $3, 'Cancelled', 'Cancelled by customer')`,
+      [randomUUID(), row.v_servicerequestid, userId],
     )
     return { cancelled: true }
   })
@@ -2041,20 +2935,60 @@ async function handleCustomerInbox(req, res, userId) {
   }
 
   const services = await pool.query(
-    `SELECT sr.*, s.v_servicename
+    `SELECT sr.*, s.v_servicename, u.v_firstname, u.v_lastname, u.v_companyname, u.v_emailaddress
        FROM public.tbl_servicerequest sr
        JOIN public.tbl_service s ON s.v_serviceid = sr.v_serviceid
+       JOIN public.tbl_user u ON u.v_userid = sr.v_userid
       WHERE sr.v_userid = $1
       ORDER BY sr.v_submittedat DESC
       LIMIT 50`,
     [userId],
   )
+  const notifications = await customerNotifications(userId)
 
   return sendJson(res, 200, {
     ok: true,
     quotations,
     serviceRequests: services.rows.map((row) => serviceRequestDto(row, row.v_servicename)),
+    notifications,
   })
+}
+
+async function customerNotifications(userId) {
+  if (!(await tableExists('tbl_notification'))) return []
+  const columns = await tableColumns('tbl_notification')
+  const quotationSelect = columns.has('v_quotationid') ? 'v_quotationid' : 'NULL AS v_quotationid'
+  const serviceSelect = columns.has('v_servicerequestid') ? 'v_servicerequestid' : 'NULL AS v_servicerequestid'
+  const result = await pool.query(
+    `SELECT v_notificationid, ${quotationSelect}, ${serviceSelect}, v_notificationtype, v_notificationtitle, v_notificationmessage, v_isread, v_createdat
+       FROM public.tbl_notification
+      WHERE v_userid = $1
+      ORDER BY v_createdat DESC
+      LIMIT 24`,
+    [userId],
+  )
+  const latestBySubject = []
+  const seen = new Set()
+  for (const row of result.rows) {
+    const key = [
+      row.v_notificationtype || 'Notification',
+      row.v_quotationid ? `quotation:${row.v_quotationid}` : '',
+      row.v_servicerequestid ? `service:${row.v_servicerequestid}` : '',
+      !row.v_quotationid && !row.v_servicerequestid ? row.v_notificationtitle || row.v_notificationmessage || row.v_notificationid : '',
+    ].join('|')
+    if (seen.has(key)) continue
+    seen.add(key)
+    latestBySubject.push(row)
+    if (latestBySubject.length >= 8) break
+  }
+  return latestBySubject.map((row) => ({
+    id: row.v_notificationid,
+    type: row.v_notificationtype,
+    title: row.v_notificationtitle,
+    message: row.v_notificationmessage,
+    read: Boolean(row.v_isread),
+    createdAt: row.v_createdat,
+  }))
 }
 
 async function staffQuotationRows() {
@@ -2073,7 +3007,7 @@ async function staffQuotationItemMap(quotationIds) {
   const variantColumns = await tableColumns('tbl_productvariant')
   const stockColumn = firstColumn(variantColumns, ['v_stockquantity', 'v_stockqty', 'v_quantityonhand', 'v_quantity'])
   const result = await pool.query(
-    `SELECT qpi.v_quotationid, qpi.v_quantity, qpi.v_unitprice, qpi.v_itemdescription,
+    `SELECT qpi.v_quotationid, qpi.v_quotationproductitemid, qpi.v_quantity, qpi.v_unitprice, qpi.v_itemdescription,
             pv.v_productvariantid,
             pv.v_productcode, pv.v_productmodel, pv.v_productsize, pv.v_productunit,
             ${stockColumn ? `pv.${stockColumn}` : 'NULL'} AS stock_quantity,
@@ -2091,6 +3025,7 @@ async function staffQuotationItemMap(quotationIds) {
     const unitPrice = quotationUnitPrice(row.v_unitprice)
     const quantity = Number(row.v_quantity || 0)
     list.push({
+      quotationProductItemId: row.v_quotationproductitemid,
       productVariantId: row.v_productvariantid,
       productName: row.v_productname,
       productCode: row.v_productcode,
@@ -2124,27 +3059,84 @@ function customerName(row) {
   return [row.v_firstname, row.v_lastname].filter(Boolean).join(' ') || row.v_companyname || row.v_emailaddress || 'Customer'
 }
 
+function customerUpdateMessage(referenceNumber, status, date, time, staff) {
+  const bits = [`${referenceNumber} is now ${status}.`]
+  if (date || time) bits.push(`Schedule: ${dateOnly(date) || 'date pending'} ${timeOnly(time) || ''}`.trim())
+  if (staff) bits.push(`Assigned staff: ${staff}.`)
+  return bits.join(' ')
+}
+
+async function createCustomerNotification(client, { userId, quotationId = null, serviceRequestId = null, type, title, message }) {
+  if (!(await tableExists('tbl_notification', client))) return
+  const columns = await tableColumns('tbl_notification', client)
+  const resetRead = columns.has('v_isread') ? ', v_isread = false' : ''
+  if (quotationId && columns.has('v_quotationid')) {
+    const updated = await client.query(
+      `UPDATE public.tbl_notification
+          SET v_notificationtitle = $4,
+              v_notificationmessage = $5${resetRead}
+        WHERE v_userid = $1
+          AND v_notificationtype = $2
+          AND v_quotationid = $3`,
+      [userId, type, quotationId, title, message],
+    )
+    if (updated.rowCount) return
+  }
+  if (serviceRequestId && columns.has('v_servicerequestid')) {
+    const updated = await client.query(
+      `UPDATE public.tbl_notification
+          SET v_notificationtitle = $4,
+              v_notificationmessage = $5${resetRead}
+        WHERE v_userid = $1
+          AND v_notificationtype = $2
+          AND v_servicerequestid = $3`,
+      [userId, type, serviceRequestId, title, message],
+    )
+    if (updated.rowCount) return
+  }
+  const insert = buildInsert('tbl_notification', {
+    v_userid: userId,
+    v_quotationid: columns.has('v_quotationid') ? quotationId : undefined,
+    v_servicerequestid: columns.has('v_servicerequestid') ? serviceRequestId : undefined,
+    v_notificationtype: type,
+    v_notificationtitle: title,
+    v_notificationmessage: message,
+    ...(columns.has('v_isread') ? { v_isread: false } : {}),
+  })
+  if (insert) await client.query(insert.sql, insert.params)
+}
+
 async function handleStaffWorkQueue(req, res) {
   const [quotations, serviceRequests] = await Promise.all([staffQuotationRows(), staffServiceRows()])
   const quotationItems = await staffQuotationItemMap(quotations.map((row) => row.v_quotationid))
   const items = [
-    ...quotations.map((row) => ({
-      id: row.v_referencenumber,
-      kind: 'Quotation',
-      customer: customerName(row),
-      company: row.v_companyname || '',
-      email: row.v_emailaddress || '',
-      contactNumber: row.v_contactnumber || '',
-      subject: row.v_projectname || row.v_establishmentname || 'Product quotation',
-      status: row.v_quotationstatus,
-      priority: 'Normal',
-      submittedAt: row.v_submittedat,
-      updatedAt: row.v_updatedat,
-      projectAddress: row.v_projectaddress,
-      customerRemarks: row.v_customerremarks,
-      totalAmount: toMoneyNumber(row.v_additionalcost),
-      items: quotationItems.get(row.v_quotationid) || [],
-    })),
+    ...quotations.map((row) => {
+      const rowItems = quotationItems.get(row.v_quotationid) || []
+      const totals = quotationTotals(row, rowItems)
+      return {
+        id: row.v_referencenumber,
+        kind: 'Quotation',
+        customer: customerName(row),
+        company: row.v_companyname || '',
+        email: row.v_emailaddress || '',
+        contactNumber: row.v_contactnumber || '',
+        subject: row.v_projectname || row.v_establishmentname || 'Product quotation',
+        status: row.v_quotationstatus,
+        priority: 'Normal',
+        submittedAt: row.v_submittedat,
+        updatedAt: row.v_updatedat,
+        completedAt: row.v_completedat,
+        quotationDate: dateOnly(row.v_quotationdate),
+        preferredDate: dateOnly(row.v_scheduleddate),
+        preferredTime: timeOnly(row.v_scheduledtime),
+        staff: row.v_assignedstaff,
+        projectAddress: row.v_projectaddress,
+        customerRemarks: row.v_customerremarks,
+        additionalCost: totals.additionalCost,
+        totalAmount: totals.totalAmount,
+        items: rowItems,
+      }
+    }),
     ...serviceRequests.map((row) => ({
       id: row.v_referencenumber,
       kind: 'Service',
@@ -2157,12 +3149,23 @@ async function handleStaffWorkQueue(req, res) {
       priority: row.v_prioritylevel || 'Normal',
       submittedAt: row.v_submittedat,
       updatedAt: row.v_updatedat,
+      completedAt: row.v_completedat,
       projectAddress: row.v_projectaddress,
-      preferredDate: row.v_preferreddate,
-      preferredTime: row.v_preferredtime,
+      preferredDate: dateOnly(row.v_preferreddate),
+      preferredTime: timeOnly(row.v_preferredtime),
       recurrenceFrequency: recurrenceFromRemarks(row.v_customerremarks),
       customerRemarks: stripRecurrenceFromRemarks(row.v_customerremarks),
       problemDescription: row.v_problemdescription,
+      totalAmount: row.v_quotedamount === null || row.v_quotedamount === undefined ? null : toMoneyNumber(row.v_quotedamount),
+      quotation: row.v_quotedamount === null || row.v_quotedamount === undefined ? null : serviceQuotationDto(row, row.v_servicename, toMoneyNumber(row.v_quotedamount)),
+      payment: row.v_paymentstatus ? {
+        referenceNumber: row.v_referencenumber,
+        status: row.v_paymentstatus,
+        amount: toMoneyNumber(row.v_quotedamount),
+        currency: 'PHP',
+        receiptNumber: row.v_receiptnumber || '',
+        paidAt: row.v_paidat || null,
+      } : null,
     })),
   ].sort((a, b) => new Date(b.submittedAt || 0) - new Date(a.submittedAt || 0))
 
@@ -2171,40 +3174,95 @@ async function handleStaffWorkQueue(req, res) {
 
 async function handleStaffUpdateQuotation(req, res, staffUser, referenceNumber) {
   const body = await readBody(req)
+  const notifyCustomer = body.notifyCustomer !== false
   const status = clean(body.status, 80) || 'Under Review'
-  const additionalCost = body.additionalCost === '' || body.additionalCost === null || body.additionalCost === undefined
-    ? null
-    : toMoneyNumber(body.additionalCost)
+  const additionalCost = staffQuotationAdjustment(body)
+  const quotationDate = nullable(body.quotationDate, 20)
   const validUntil = nullable(body.validUntil, 20)
+  const schedule = body.schedule && typeof body.schedule === 'object' ? body.schedule : {}
+  const scheduledDate = nullable(schedule.date, 20)
+  const scheduledTime = normalizePreferredTime(nullable(schedule.time, 20))
+  const assignedStaff = nullable(schedule.staff, 160)
   const remarks = nullable(body.remarks, 1000)
   if (body.additionalCost !== '' && body.additionalCost !== null && body.additionalCost !== undefined) {
     const rawAdditionalCost = Number(body.additionalCost)
-    if (!Number.isFinite(rawAdditionalCost) || rawAdditionalCost < 0) {
-      return sendJson(res, 400, { error: 'Additional cost must be a non-negative number.' })
+    if (!Number.isFinite(rawAdditionalCost)) {
+      return sendJson(res, 400, { error: 'Quotation adjustment must be a valid number.' })
     }
+  }
+  const chargeError = validateStaffQuotationCharges(body.charges)
+  if (chargeError) return sendJson(res, 400, { error: chargeError })
+  if (isPayableQuotationStatus(status) && submittedQuotationTotal(body) <= 0) {
+    return sendJson(res, 400, { error: 'Final total must be greater than zero before customer payment.' })
+  }
+  if (quotationDate && (!validIsoDate(quotationDate) || quotationDate < manilaNowParts().date)) {
+    return sendJson(res, 400, { error: 'Quotation date cannot be in the past.' })
   }
   if (validUntil && (!validIsoDate(validUntil) || validUntil < manilaNowParts().date)) {
     return sendJson(res, 400, { error: 'Quotation validity date cannot be in the past.' })
   }
+  const scheduleError = validatePreferredSchedule(scheduledDate, scheduledTime)
+  if (scheduleError) return sendJson(res, 400, { error: scheduleError })
 
   const result = await transaction(async (client) => {
+    const quotationColumns = await tableColumns('tbl_quotation', client)
+    const params = [referenceNumber]
+    const assignments = ['v_quotationstatus = $2']
+    params.push(status)
+
+    if (additionalCost !== null) {
+      params.push(additionalCost)
+      assignments.push(`v_additionalcost = $${params.length}`)
+    }
+    if (validUntil) {
+      params.push(validUntil)
+      assignments.push(`v_validuntil = $${params.length}::date`)
+    }
+    if (quotationDate && quotationColumns.has('v_quotationdate')) {
+      params.push(quotationDate)
+      assignments.push(`v_quotationdate = $${params.length}::date`)
+    }
+    if (scheduledDate && quotationColumns.has('v_scheduleddate')) {
+      params.push(scheduledDate)
+      assignments.push(`v_scheduleddate = $${params.length}::date`)
+    }
+    if (scheduledTime && quotationColumns.has('v_scheduledtime')) {
+      params.push(scheduledTime)
+      assignments.push(`v_scheduledtime = $${params.length}::time`)
+    }
+    if (assignedStaff !== null && quotationColumns.has('v_assignedstaff')) {
+      params.push(assignedStaff)
+      assignments.push(`v_assignedstaff = $${params.length}`)
+    }
+    if (status.toLowerCase() === 'completed' && quotationColumns.has('v_completedat')) {
+      assignments.push('v_completedat = NOW()')
+    }
+    assignments.push('v_updatedat = NOW()')
+
     const updated = await client.query(
       `UPDATE public.tbl_quotation
-          SET v_quotationstatus = $2,
-              v_additionalcost = COALESCE($3, v_additionalcost),
-              v_validuntil = COALESCE($4::date, v_validuntil),
-              v_updatedat = NOW()
+          SET ${assignments.join(', ')}
         WHERE v_referencenumber = $1
         RETURNING *`,
-      [referenceNumber, status, additionalCost, validUntil],
+      params,
     )
     if (!updated.rowCount) return null
+    await updateQuotationProductPrices(client, updated.rows[0].v_quotationid, body.charges)
     await client.query(
       `INSERT INTO public.tbl_quotationstatushistory
         (v_quotationid, v_updatedbyuserid, v_status, v_statusremarks)
        VALUES ($1, $2, $3, $4)`,
       [updated.rows[0].v_quotationid, staffUser.id, status, remarks || `Updated by ${staffUser.role}`],
     )
+    if (notifyCustomer) {
+      await createCustomerNotification(client, {
+        userId: updated.rows[0].v_userid,
+        quotationId: updated.rows[0].v_quotationid,
+        type: 'Quotation',
+        title: `Quotation ${status}`,
+        message: customerUpdateMessage(updated.rows[0].v_referencenumber, status, scheduledDate, scheduledTime, assignedStaff),
+      })
+    }
     return updated.rows[0]
   })
 
@@ -2213,9 +3271,132 @@ async function handleStaffUpdateQuotation(req, res, staffUser, referenceNumber) 
   return sendJson(res, 200, { ok: true, quotation })
 }
 
+function validateStaffQuotationCharges(charges) {
+  if (charges === undefined) return ''
+  if (!Array.isArray(charges)) return 'Quotation charges must be a list.'
+  for (const charge of charges) {
+    if (!charge || typeof charge !== 'object') return 'Quotation charges must be valid charge items.'
+    if (!isMaterialCharge(charge)) continue
+    const unitPrice = Number(charge.unitPrice)
+    const quantity = Number(charge.quantity)
+    if (!Number.isFinite(unitPrice) || unitPrice < 0) return 'Material unit prices must be non-negative numbers.'
+    if (!Number.isInteger(quantity) || quantity < 1) return 'Material quantities must be whole numbers greater than zero.'
+  }
+  return ''
+}
+
+function staffQuotationAdjustment(body) {
+  if (Array.isArray(body.charges)) {
+    const materialSubtotal = body.charges
+      .filter(isMaterialCharge)
+      .reduce((sum, charge) => {
+        const quantity = Number(charge.quantity || 0)
+        const unitPrice = Number(charge.unitPrice || 0)
+        return sum + (Number.isFinite(quantity) && Number.isFinite(unitPrice) ? quantity * unitPrice : 0)
+      }, 0)
+    const submittedTotal = Number(body.quotationTotal ?? body.total ?? body.finalTotal)
+    const fallbackTotal = Number(body.additionalCost)
+    const total = Number.isFinite(submittedTotal) ? submittedTotal : fallbackTotal
+    return Number.isFinite(total) ? toMoneyNumber(total - materialSubtotal) : null
+  }
+  return body.additionalCost === '' || body.additionalCost === null || body.additionalCost === undefined
+    ? null
+    : toMoneyNumber(body.additionalCost)
+}
+
+function submittedQuotationTotal(body) {
+  const submittedTotal = Number(body.quotationTotal ?? body.total ?? body.finalTotal)
+  if (Number.isFinite(submittedTotal)) return submittedTotal
+  const charges = Array.isArray(body.charges) ? body.charges : []
+  const subtotal = charges.reduce((sum, charge) => {
+    const quantity = Number(charge?.quantity || 0)
+    const unitPrice = Number(charge?.unitPrice || 0)
+    return sum + (Number.isFinite(quantity) && Number.isFinite(unitPrice) ? quantity * unitPrice : 0)
+  }, 0)
+  const additionalCost = Number(body.additionalCost || 0)
+  return subtotal + (Number.isFinite(additionalCost) ? additionalCost : 0)
+}
+
+function servicePriceHistory(rawHistory, amount, staffUser, status) {
+  if (!Number.isFinite(Number(amount)) || Number(amount) <= 0) return rawHistory || null
+  let entries = []
+  if (Array.isArray(rawHistory)) entries = rawHistory
+  else if (typeof rawHistory === 'string' && rawHistory.trim()) {
+    try {
+      const parsed = JSON.parse(rawHistory)
+      if (Array.isArray(parsed)) entries = parsed
+    } catch {
+      entries = []
+    }
+  }
+  return JSON.stringify([
+    ...entries,
+    {
+      amount: toMoneyNumber(amount),
+      status,
+      staffUserId: staffUser?.id || '',
+      staffRole: staffUser?.role || '',
+      savedAt: new Date().toISOString(),
+    },
+  ].slice(-25))
+}
+
+async function updateQuotationProductPrices(client, quotationId, charges) {
+  if (!Array.isArray(charges) || !charges.length) return
+  for (const charge of charges.filter(isMaterialCharge)) {
+    const unitPrice = toMoneyNumber(charge.unitPrice)
+    const quantity = Number(charge.quantity)
+    const description = nullable(charge.description, 1000)
+    const quotationProductItemId = clean(charge.quotationProductItemId, 80)
+    const productVariantId = clean(charge.productVariantId, 80)
+    const materialCode = clean(charge.materialCode, 120)
+
+    if (quotationProductItemId) {
+      await client.query(
+        `UPDATE public.tbl_quotationproductitem
+            SET v_unitprice = $3,
+                v_quantity = $4,
+                v_itemdescription = COALESCE($5, v_itemdescription)
+          WHERE v_quotationid = $1
+            AND v_quotationproductitemid = $2`,
+        [quotationId, quotationProductItemId, unitPrice, quantity, description],
+      )
+    } else if (productVariantId) {
+      await client.query(
+        `UPDATE public.tbl_quotationproductitem
+            SET v_unitprice = $3,
+                v_quantity = $4,
+                v_itemdescription = COALESCE($5, v_itemdescription)
+          WHERE v_quotationid = $1
+            AND v_productvariantid = $2`,
+        [quotationId, productVariantId, unitPrice, quantity, description],
+      )
+    } else if (materialCode) {
+      await client.query(
+        `UPDATE public.tbl_quotationproductitem qpi
+            SET v_unitprice = $3,
+                v_quantity = $4,
+                v_itemdescription = COALESCE($5, qpi.v_itemdescription)
+           FROM public.tbl_productvariant pv
+          WHERE qpi.v_quotationid = $1
+            AND qpi.v_productvariantid = pv.v_productvariantid
+            AND LOWER(pv.v_productcode) = LOWER($2)`,
+        [quotationId, materialCode, unitPrice, quantity, description],
+      )
+    }
+  }
+}
+
+function isMaterialCharge(charge) {
+  const type = String(charge?.type || '').trim().toLowerCase()
+  return type === 'materials charge' || type === 'material charge' || type === 'materials' || type === 'material'
+}
+
 async function handleStaffUpdateServiceRequest(req, res, staffUser, referenceNumber) {
   const body = await readBody(req)
+  const notifyCustomer = body.notifyCustomer !== false
   const status = clean(body.status, 80) || 'Under Review'
+  const quotedAmount = body.quotedAmount !== undefined ? toMoneyNumber(body.quotedAmount) : submittedQuotationTotal(body)
   const preferredDate = nullable(body.preferredDate, 20)
   const preferredTime = normalizePreferredTime(nullable(body.preferredTime, 20))
   if (body.recurrenceFrequency !== undefined && !isSupportedRecurrenceFrequency(body.recurrenceFrequency)) {
@@ -2225,10 +3406,14 @@ async function handleStaffUpdateServiceRequest(req, res, staffUser, referenceNum
   const remarks = nullable(body.remarks, 1000)
   const scheduleError = validatePreferredSchedule(preferredDate, preferredTime)
   if (scheduleError) return sendJson(res, 400, { error: scheduleError })
+  if (isPayableQuotationStatus(status) && quotedAmount <= 0) {
+    return sendJson(res, 400, { error: 'Final total must be greater than zero before customer payment.' })
+  }
 
   const result = await transaction(async (client) => {
+    const columns = await tableColumns('tbl_servicerequest', client)
     const existing = await client.query(
-      `SELECT v_customerremarks
+      `SELECT *
          FROM public.tbl_servicerequest
         WHERE v_referencenumber = $1
         LIMIT 1`,
@@ -2238,24 +3423,37 @@ async function handleStaffUpdateServiceRequest(req, res, staffUser, referenceNum
       ? customerRemarksWithRecurrence(stripRecurrenceFromRemarks(existing.rows[0]?.v_customerremarks), recurrenceFrequency)
       : existing.rows[0]?.v_customerremarks
 
-    const updated = await client.query(
-      `UPDATE public.tbl_servicerequest
-          SET v_requeststatus = $2,
-              v_preferreddate = COALESCE($3::date, v_preferreddate),
-              v_preferredtime = COALESCE($4::time, v_preferredtime),
-              v_customerremarks = COALESCE($5, v_customerremarks),
-              v_updatedat = NOW()
-        WHERE v_referencenumber = $1
-        RETURNING *`,
-      [referenceNumber, status, preferredDate, preferredTime, nextRemarks],
-    )
+    const priceHistory = columns.has('v_pricehistory')
+      ? servicePriceHistory(existing.rows[0]?.v_pricehistory, quotedAmount, staffUser, status)
+      : undefined
+    const update = buildUpdate('tbl_servicerequest', 'v_referencenumber', referenceNumber, {
+      v_requeststatus: status,
+      v_preferreddate: preferredDate,
+      v_preferredtime: preferredTime,
+      v_customerremarks: nextRemarks,
+      ...(status.toLowerCase() === 'completed' && columns.has('v_completedat') ? { v_completedat: new Date() } : {}),
+      ...(columns.has('v_quotedamount') && quotedAmount > 0 ? { v_quotedamount: quotedAmount } : {}),
+      ...(columns.has('v_paymentstatus') && isPayableQuotationStatus(status) ? { v_paymentstatus: 'Pending' } : {}),
+      ...(columns.has('v_pricehistory') && priceHistory ? { v_pricehistory: priceHistory } : {}),
+      ...(columns.has('v_updatedat') ? { v_updatedat: new Date() } : {}),
+    })
+    const updated = await client.query(update.sql, update.params)
     if (!updated.rowCount) return null
     await client.query(
       `INSERT INTO public.tbl_servicerequeststatushistory
-        (v_servicerequestid, v_updatedbyuserid, v_status, v_statusremarks)
-       VALUES ($1, $2, $3, $4)`,
-      [updated.rows[0].v_servicerequestid, staffUser.id, status, remarks || `Updated by ${staffUser.role}`],
+        (v_servicerequeststatushistoryid, v_servicerequestid, v_updatedbyuserid, v_status, v_statusremarks)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [randomUUID(), updated.rows[0].v_servicerequestid, staffUser.id, status, remarks || `Updated by ${staffUser.role}`],
     )
+    if (notifyCustomer) {
+      await createCustomerNotification(client, {
+        userId: updated.rows[0].v_userid,
+        serviceRequestId: updated.rows[0].v_servicerequestid,
+        type: 'Service Request',
+        title: `Service request ${status}`,
+        message: customerUpdateMessage(updated.rows[0].v_referencenumber, status, preferredDate, preferredTime, null),
+      })
+    }
     return updated.rows[0]
   })
 
@@ -2269,7 +3467,7 @@ async function handleListMaterials(req, res) {
 }
 
 async function handleCreateMaterial(req, res) {
-  const body = await readBody(req)
+  const body = await readBody(req, 1_000_000)
   const name = clean(body.name, 180)
   const sku = clean(body.sku, 80)
   if (!name || !sku) return sendJson(res, 400, { error: 'Material name and SKU are required.' })
@@ -2278,13 +3476,24 @@ async function handleCreateMaterial(req, res) {
     const productColumns = await tableColumns('tbl_product', client)
     const variantColumns = await tableColumns('tbl_productvariant', client)
     const categoryColumn = firstColumn(productColumns, ['v_productcategory', 'v_category', 'v_producttype'])
+    const categoryIdColumn = productColumns.has('v_productcategoryid') ? 'v_productcategoryid' : ''
+    const productImageColumn = firstColumn(productColumns, ['v_productimageurl', 'v_imageurl', 'v_image_url'])
     const stockColumn = firstColumn(variantColumns, ['v_stockquantity', 'v_stockqty', 'v_quantityonhand', 'v_quantity'])
     const reorderColumn = firstColumn(variantColumns, ['v_reorderlevel', 'v_reorderpoint'])
+    const variantImageColumn = firstColumn(variantColumns, ['v_variantimageurl', 'v_productimageurl', 'v_imageurl', 'v_image_url'])
+    const variantDescriptionColumn = firstColumn(variantColumns, ['v_variantdescription', 'v_description'])
+    const minPriceColumn = firstColumn(variantColumns, ['v_minprice', 'v_min_price', 'v_pricemin', 'v_price_min'])
+    const maxPriceColumn = firstColumn(variantColumns, ['v_maxprice', 'v_max_price', 'v_pricemax', 'v_price_max'])
+    const categoryId = categoryIdColumn
+      ? await resolveCategoryId(client, 'tbl_productcategory', 'v_productcategoryid', 'v_categoryname', body.category, 'Uncategorized')
+      : null
 
     const productInsert = buildInsert('tbl_product', {
       v_productname: name,
       v_isactive: true,
+      ...(categoryIdColumn ? { [categoryIdColumn]: categoryId } : {}),
       ...(categoryColumn ? { [categoryColumn]: nullable(body.category, 120) } : {}),
+      ...(productImageColumn ? { [productImageColumn]: imageInput(body.imageUrl) } : {}),
     })
     const product = await client.query(productInsert.sql, productInsert.params)
 
@@ -2295,8 +3504,12 @@ async function handleCreateMaterial(req, res) {
       v_productsize: nullable(body.size, 80),
       v_productunit: nullable(body.unit, 40) || 'unit',
       v_isactive: true,
+      ...(variantDescriptionColumn ? { [variantDescriptionColumn]: nullable(body.description, 1200) } : {}),
+      ...(variantImageColumn ? { [variantImageColumn]: imageInput(body.imageUrl) } : {}),
       ...(stockColumn ? { [stockColumn]: Number(body.stock || 0) } : {}),
       ...(reorderColumn ? { [reorderColumn]: Number(body.reorderLevel || 0) } : {}),
+      ...(minPriceColumn ? { [minPriceColumn]: nullableMoney(body.minPrice) } : {}),
+      ...(maxPriceColumn ? { [maxPriceColumn]: nullableMoney(body.maxPrice) } : {}),
     })
     await client.query(variantInsert.sql, variantInsert.params)
   })
@@ -2306,7 +3519,7 @@ async function handleCreateMaterial(req, res) {
 
 async function handleUpdateMaterial(req, res, variantId) {
   if (!isUuid(variantId)) return sendJson(res, 400, { error: 'Invalid material id.' })
-  const body = await readBody(req)
+  const body = await readBody(req, 1_000_000)
   await transaction(async (client) => {
     const variant = await client.query(
       'SELECT v_productid FROM public.tbl_productvariant WHERE v_productvariantid = $1 LIMIT 1',
@@ -2321,12 +3534,23 @@ async function handleUpdateMaterial(req, res, variantId) {
     const productColumns = await tableColumns('tbl_product', client)
     const variantColumns = await tableColumns('tbl_productvariant', client)
     const categoryColumn = firstColumn(productColumns, ['v_productcategory', 'v_category', 'v_producttype'])
+    const categoryIdColumn = productColumns.has('v_productcategoryid') ? 'v_productcategoryid' : ''
+    const productImageColumn = firstColumn(productColumns, ['v_productimageurl', 'v_imageurl', 'v_image_url'])
     const stockColumn = firstColumn(variantColumns, ['v_stockquantity', 'v_stockqty', 'v_quantityonhand', 'v_quantity'])
     const reorderColumn = firstColumn(variantColumns, ['v_reorderlevel', 'v_reorderpoint'])
+    const variantImageColumn = firstColumn(variantColumns, ['v_variantimageurl', 'v_productimageurl', 'v_imageurl', 'v_image_url'])
+    const variantDescriptionColumn = firstColumn(variantColumns, ['v_variantdescription', 'v_description'])
+    const minPriceColumn = firstColumn(variantColumns, ['v_minprice', 'v_min_price', 'v_pricemin', 'v_price_min'])
+    const maxPriceColumn = firstColumn(variantColumns, ['v_maxprice', 'v_max_price', 'v_pricemax', 'v_price_max'])
+    const categoryId = categoryIdColumn && body.category !== undefined
+      ? await resolveCategoryId(client, 'tbl_productcategory', 'v_productcategoryid', 'v_categoryname', body.category, 'Uncategorized')
+      : undefined
 
     const productUpdate = buildUpdate('tbl_product', 'v_productid', variant.rows[0].v_productid, {
       v_productname: body.name === undefined ? undefined : clean(body.name, 180),
+      ...(categoryIdColumn && body.category !== undefined ? { [categoryIdColumn]: categoryId } : {}),
       ...(categoryColumn && body.category !== undefined ? { [categoryColumn]: nullable(body.category, 120) } : {}),
+      ...(productImageColumn && body.imageUrl !== undefined ? { [productImageColumn]: imageInput(body.imageUrl) } : {}),
       ...(productColumns.has('v_updatedat') ? { v_updatedat: new Date() } : {}),
     })
     if (productUpdate) await client.query(productUpdate.sql, productUpdate.params)
@@ -2337,8 +3561,12 @@ async function handleUpdateMaterial(req, res, variantId) {
       v_productsize: body.size === undefined ? undefined : nullable(body.size, 80),
       v_productunit: body.unit === undefined ? undefined : nullable(body.unit, 40),
       v_isactive: body.active === undefined ? undefined : Boolean(body.active),
+      ...(variantDescriptionColumn && body.description !== undefined ? { [variantDescriptionColumn]: nullable(body.description, 1200) } : {}),
+      ...(variantImageColumn && body.imageUrl !== undefined ? { [variantImageColumn]: imageInput(body.imageUrl) } : {}),
       ...(stockColumn && body.stock !== undefined ? { [stockColumn]: Number(body.stock || 0) } : {}),
       ...(reorderColumn && body.reorderLevel !== undefined ? { [reorderColumn]: Number(body.reorderLevel || 0) } : {}),
+      ...(minPriceColumn && body.minPrice !== undefined ? { [minPriceColumn]: nullableMoney(body.minPrice) } : {}),
+      ...(maxPriceColumn && body.maxPrice !== undefined ? { [maxPriceColumn]: nullableMoney(body.maxPrice) } : {}),
       ...(variantColumns.has('v_updatedat') ? { v_updatedat: new Date() } : {}),
     })
     if (variantUpdate) await client.query(variantUpdate.sql, variantUpdate.params)
@@ -2364,22 +3592,33 @@ async function handleListServices(req, res) {
 }
 
 async function handleCreateServiceAdmin(req, res) {
-  const body = await readBody(req)
+  const body = await readBody(req, 1_000_000)
   const name = clean(body.name, 180)
   const code = clean(body.code, 80)
   if (!name || !code) return sendJson(res, 400, { error: 'Service name and code are required.' })
 
   const columns = await tableColumns('tbl_service')
   const categoryColumn = firstColumn(columns, ['v_servicecategory', 'v_category'])
+  const categoryIdColumn = columns.has('v_servicecategoryid') ? 'v_servicecategoryid' : ''
   const durationColumn = firstColumn(columns, ['v_estimatedduration', 'v_duration'])
   const descriptionColumn = firstColumn(columns, ['v_servicedescription', 'v_description'])
+  const imageColumn = firstColumn(columns, ['v_serviceimageurl', 'v_imageurl', 'v_image_url'])
+  const minPriceColumn = firstColumn(columns, ['v_minprice', 'v_min_price', 'v_pricemin', 'v_price_min'])
+  const maxPriceColumn = firstColumn(columns, ['v_maxprice', 'v_max_price', 'v_pricemax', 'v_price_max'])
+  const categoryId = categoryIdColumn
+    ? await resolveCategoryId(pool, 'tbl_servicecategory', 'v_servicecategoryid', 'v_categoryname', body.category, 'Services')
+    : null
   const insert = buildInsert('tbl_service', {
     v_servicecode: code,
     v_servicename: name,
     v_isactive: Boolean(body.active ?? true),
+    ...(categoryIdColumn ? { [categoryIdColumn]: categoryId } : {}),
     ...(categoryColumn ? { [categoryColumn]: nullable(body.category, 120) } : {}),
     ...(durationColumn ? { [durationColumn]: nullable(body.duration, 120) } : {}),
     ...(descriptionColumn ? { [descriptionColumn]: nullable(body.description, 1200) } : {}),
+    ...(imageColumn ? { [imageColumn]: imageInput(body.imageUrl) } : {}),
+    ...(minPriceColumn ? { [minPriceColumn]: nullableMoney(body.minPrice) } : {}),
+    ...(maxPriceColumn ? { [maxPriceColumn]: nullableMoney(body.maxPrice) } : {}),
   })
   await pool.query(insert.sql, insert.params)
   return sendJson(res, 201, { ok: true, services: await listServices() })
@@ -2387,18 +3626,29 @@ async function handleCreateServiceAdmin(req, res) {
 
 async function handleUpdateServiceAdmin(req, res, serviceId) {
   if (!isUuid(serviceId)) return sendJson(res, 400, { error: 'Invalid service id.' })
-  const body = await readBody(req)
+  const body = await readBody(req, 1_000_000)
   const columns = await tableColumns('tbl_service')
   const categoryColumn = firstColumn(columns, ['v_servicecategory', 'v_category'])
+  const categoryIdColumn = columns.has('v_servicecategoryid') ? 'v_servicecategoryid' : ''
   const durationColumn = firstColumn(columns, ['v_estimatedduration', 'v_duration'])
   const descriptionColumn = firstColumn(columns, ['v_servicedescription', 'v_description'])
+  const imageColumn = firstColumn(columns, ['v_serviceimageurl', 'v_imageurl', 'v_image_url'])
+  const minPriceColumn = firstColumn(columns, ['v_minprice', 'v_min_price', 'v_pricemin', 'v_price_min'])
+  const maxPriceColumn = firstColumn(columns, ['v_maxprice', 'v_max_price', 'v_pricemax', 'v_price_max'])
+  const categoryId = categoryIdColumn && body.category !== undefined
+    ? await resolveCategoryId(pool, 'tbl_servicecategory', 'v_servicecategoryid', 'v_categoryname', body.category, 'Services')
+    : undefined
   const update = buildUpdate('tbl_service', 'v_serviceid', serviceId, {
     v_servicecode: body.code === undefined ? undefined : clean(body.code, 80),
     v_servicename: body.name === undefined ? undefined : clean(body.name, 180),
     v_isactive: body.active === undefined ? undefined : Boolean(body.active),
+    ...(categoryIdColumn && body.category !== undefined ? { [categoryIdColumn]: categoryId } : {}),
     ...(categoryColumn && body.category !== undefined ? { [categoryColumn]: nullable(body.category, 120) } : {}),
     ...(durationColumn && body.duration !== undefined ? { [durationColumn]: nullable(body.duration, 120) } : {}),
     ...(descriptionColumn && body.description !== undefined ? { [descriptionColumn]: nullable(body.description, 1200) } : {}),
+    ...(imageColumn && body.imageUrl !== undefined ? { [imageColumn]: imageInput(body.imageUrl) } : {}),
+    ...(minPriceColumn && body.minPrice !== undefined ? { [minPriceColumn]: nullableMoney(body.minPrice) } : {}),
+    ...(maxPriceColumn && body.maxPrice !== undefined ? { [maxPriceColumn]: nullableMoney(body.maxPrice) } : {}),
     ...(columns.has('v_updatedat') ? { v_updatedat: new Date() } : {}),
   })
   if (update) {
@@ -2439,8 +3689,9 @@ function friendlyDatabaseError(error) {
   if (error.code === '42P01') return 'A required service is not configured on the server yet.'
   if (error.code === '23503') return 'A required record could not be found. Please refresh and try again.'
   if (error.code === '23505') return 'That information already exists. Please review your entry and try again.'
-  if (error.code === '28P01') return 'The database rejected the configured credentials. Check DATABASE_URL in .env.'
-  if (['ECONNREFUSED', 'ENOTFOUND', 'ETIMEDOUT'].includes(error.code)) return 'The API could not reach the database. Check DATABASE_URL and your network connection.'
+  if (error.code === 'ER_NO_SUCH_TABLE') return 'A required MySQL table is missing. Import database/katala_xampp_mysql_schema.sql in phpMyAdmin.'
+  if (error.code === 'ER_ACCESS_DENIED_ERROR' || error.code === '28P01') return 'The database rejected the configured credentials. Check your database settings in .env.'
+  if (['ECONNREFUSED', 'ENOTFOUND', 'ETIMEDOUT'].includes(error.code)) return 'The API could not reach the database. Check that XAMPP MySQL is running and your .env database settings are correct.'
   return null
 }
 
@@ -2460,7 +3711,7 @@ async function reportDatabaseReadiness() {
     console.log(`Catalog readiness: ${counts.product_variants || 0} active product variant(s), ${counts.services || 0} active service(s)`)
 
     if (!counts.product_variants || !counts.services) {
-      console.warn('Catalog/service data is incomplete. Run katala_catalog_service_seed.sql in Supabase before testing quotation/service submissions.')
+      console.warn('Catalog/service data is incomplete. Import database/katala_xampp_mysql_schema.sql in phpMyAdmin before testing quotation/service submissions.')
     }
   } catch (error) {
     console.error('Database connection check failed:', error.message)
@@ -2476,8 +3727,12 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`)
   if (isRateLimited(req, url)) return sendJson(res, 429, { error: 'Too many requests. Please wait a few seconds and try again.' })
   const quotationMatch = url.pathname.match(/^\/api\/quotations\/([^/]+)$/)
+  const quotationConfirmMatch = url.pathname.match(/^\/api\/quotations\/([^/]+)\/confirm$/)
+  const quotationMockPaymentMatch = url.pathname.match(/^\/api\/quotations\/([^/]+)\/mock-payment$/)
   const quotationCheckoutMatch = url.pathname.match(/^\/api\/quotations\/([^/]+)\/paymongo-checkout$/)
   const serviceRequestMatch = url.pathname.match(/^\/api\/service-requests\/([^/]+)$/)
+  const serviceRequestConfirmMatch = url.pathname.match(/^\/api\/service-requests\/([^/]+)\/confirm$/)
+  const serviceRequestMockPaymentMatch = url.pathname.match(/^\/api\/service-requests\/([^/]+)\/mock-payment$/)
   const staffQuotationMatch = url.pathname.match(/^\/api\/staff\/quotations\/([^/]+)$/)
   const staffServiceRequestMatch = url.pathname.match(/^\/api\/staff\/service-requests\/([^/]+)$/)
   const adminMaterialMatch = url.pathname.match(/^\/api\/admin\/materials\/([^/]+)$/)
@@ -2489,11 +3744,13 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, {
         ok: true,
         databaseConfigured: Boolean(pool),
+        authProvider: authMode === 'local' ? 'local' : 'supabase',
         supabaseAuthConfigured: Boolean(supabaseAuth),
+        mysqlConfigured: Boolean(useMysql),
         paymongoConfigured: Boolean(paymongoSecretKey),
-        message: pool && supabaseAuth
-          ? 'API, database, and Supabase Auth are configured.'
-          : 'Configuration is incomplete. Check DATABASE_URL and Supabase environment variables.',
+        message: pool && (authMode === 'local' || supabaseAuth)
+          ? `API, database, and ${authMode === 'local' ? 'local XAMPP auth' : 'Supabase Auth'} are configured.`
+          : 'Configuration is incomplete. Check your database and auth environment variables.',
       })
     }
 
@@ -2508,9 +3765,19 @@ const server = http.createServer(async (req, res) => {
         const materials = (await listMaterials()).filter((item) => item.active)
         return sendJson(res, 200, { ok: true, materials })
       }
+      if (req.method === 'GET' && url.pathname === '/api/catalog/services') {
+        const services = (await listServices()).filter((item) => item.active)
+        return sendJson(res, 200, { ok: true, services })
+      }
 
       if (req.method === 'POST' && url.pathname === '/api/auth/register-profile') {
         return await handleRegisterProfile(req, res)
+      }
+      if (req.method === 'POST' && url.pathname === '/api/auth/signup') {
+        return await handleLocalSignup(req, res)
+      }
+      if (req.method === 'POST' && url.pathname === '/api/auth/signin') {
+        return await handleLocalSignin(req, res)
       }
 
       if (url.pathname.startsWith('/api/admin/')) {
@@ -2518,6 +3785,7 @@ const server = http.createServer(async (req, res) => {
         if (!adminUser) return
 
         if (req.method === 'GET' && url.pathname === '/api/admin/accounts') return await handleListAccounts(req, res)
+        if (req.method === 'GET' && url.pathname === '/api/admin/dashboard') return await handleAdminDashboard(req, res)
         if (adminAccountMatch && req.method === 'PATCH') return await handleUpdateAccount(req, res, decodeURIComponent(adminAccountMatch[1]))
         if (req.method === 'GET' && url.pathname === '/api/admin/database-backup') return await handleDatabaseBackup(req, res)
 
@@ -2537,6 +3805,7 @@ const server = http.createServer(async (req, res) => {
         if (!staffUser) return
 
         if (req.method === 'GET' && url.pathname === '/api/staff/work-queue') return await handleStaffWorkQueue(req, res)
+        if (req.method === 'GET' && url.pathname === '/api/staff/members') return await handleListStaffMembers(req, res)
         if (staffQuotationMatch && req.method === 'PATCH') return await handleStaffUpdateQuotation(req, res, staffUser, decodeURIComponent(staffQuotationMatch[1]))
         if (staffServiceRequestMatch && req.method === 'PATCH') return await handleStaffUpdateServiceRequest(req, res, staffUser, decodeURIComponent(staffServiceRequestMatch[1]))
       }
@@ -2561,6 +3830,8 @@ const server = http.createServer(async (req, res) => {
       if (req.method === 'GET' && url.pathname === '/api/customer/inbox') return await handleCustomerInbox(req, res, userId)
 
       if (req.method === 'POST' && url.pathname === '/api/quotations') return await handleCreateQuotation(req, res, userId)
+      if (quotationConfirmMatch && req.method === 'POST') return await handleConfirmQuotation(req, res, userId, decodeURIComponent(quotationConfirmMatch[1]))
+      if (quotationMockPaymentMatch && req.method === 'POST') return await handleMockQuotationPayment(req, res, userId, decodeURIComponent(quotationMockPaymentMatch[1]))
       if (quotationCheckoutMatch && req.method === 'POST') return await handleCreatePaymongoCheckout(req, res, userId, decodeURIComponent(quotationCheckoutMatch[1]))
       if (quotationMatch && req.method === 'GET') return await handleGetQuotation(req, res, userId, decodeURIComponent(quotationMatch[1]))
       if (quotationMatch && req.method === 'PATCH') return await handleUpdateQuotation(req, res, userId, decodeURIComponent(quotationMatch[1]))
@@ -2570,6 +3841,8 @@ const server = http.createServer(async (req, res) => {
       if (receiptMatch && req.method === 'GET') return await handleGetReceipt(req, res, userId, decodeURIComponent(receiptMatch[1]))
 
       if (req.method === 'POST' && url.pathname === '/api/service-requests') return await handleCreateServiceRequest(req, res, userId)
+      if (serviceRequestConfirmMatch && req.method === 'POST') return await handleConfirmServiceRequest(req, res, userId, decodeURIComponent(serviceRequestConfirmMatch[1]))
+      if (serviceRequestMockPaymentMatch && req.method === 'POST') return await handleMockServicePayment(req, res, userId, decodeURIComponent(serviceRequestMockPaymentMatch[1]))
       if (serviceRequestMatch && req.method === 'GET') return await handleGetServiceRequest(req, res, userId, decodeURIComponent(serviceRequestMatch[1]))
       if (serviceRequestMatch && req.method === 'PATCH') return await handleUpdateServiceRequest(req, res, userId, decodeURIComponent(serviceRequestMatch[1]))
       if (serviceRequestMatch && req.method === 'DELETE') return await handleCancelServiceRequest(req, res, userId, decodeURIComponent(serviceRequestMatch[1]))
@@ -2583,7 +3856,7 @@ const server = http.createServer(async (req, res) => {
     if (error.message === 'PAYLOAD_TOO_LARGE') return sendJson(res, 413, { error: 'Submission is too large.' })
     if (error instanceof SyntaxError) return sendJson(res, 400, { error: 'Invalid JSON request body.' })
     if (error.message === 'ASSIGNMENT_REQUIRES_STAFF') return sendJson(res, 400, { error: 'Only staff accounts can receive staff assignment details.' })
-    if (error.message === 'STAFF_ASSIGNMENT_SCHEMA_MISSING') return sendJson(res, 409, { error: 'Staff assignment columns are missing. Run database/katala_staff_assignment_migration.sql in Supabase.' })
+    if (error.message === 'STAFF_ASSIGNMENT_SCHEMA_MISSING') return sendJson(res, 409, { error: 'Staff assignment columns are missing. Import the latest XAMPP MySQL schema or migration.' })
     const friendly = friendlyDatabaseError(error)
     return sendJson(res, error.statusCode || 500, { error: friendly || 'Server/database error. No table was created or altered.' })
   }
@@ -2592,6 +3865,6 @@ const server = http.createServer(async (req, res) => {
 server.listen(port, () => {
   console.log(`Katala API running on http://localhost:${port}`)
   console.log(pool ? 'Database connection: configured' : 'Database connection: not configured')
-  console.log(supabaseAuth ? 'Supabase Auth verification: configured' : 'Supabase Auth verification: not configured')
+  console.log(authMode === 'local' ? 'Auth provider: local XAMPP/MySQL' : (supabaseAuth ? 'Supabase Auth verification: configured' : 'Supabase Auth verification: not configured'))
   void reportDatabaseReadiness()
 })

@@ -2,9 +2,10 @@ import { createClient } from '@supabase/supabase-js'
 
 const supabaseUrl = (import.meta.env.VITE_SUPABASE_URL || '').trim()
 const supabasePublishableKey = (import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY || '').trim()
+const useLocalAuth = (import.meta.env.VITE_AUTH_PROVIDER || '').trim().toLowerCase() === 'local'
 export const isSupabaseConfigured = Boolean(supabaseUrl && supabasePublishableKey)
 
-if (!isSupabaseConfigured) {
+if (!isSupabaseConfigured && !useLocalAuth) {
   console.warn('Supabase Auth is not configured. Set VITE_SUPABASE_URL and VITE_SUPABASE_PUBLISHABLE_KEY.')
 }
 

@@ -3,7 +3,8 @@ import { CalendarClock, CheckCircle2, ChevronLeft, ChevronRight } from 'lucide-r
 import { PageHeading, RefreshTableButton } from '../StaffShared';
 import { useStaffSearch } from '../StaffLayout';
 import { schemaApi } from '../../services/katalaApi';
-import { completeRecurringVisit, filterStaffItems, isRecurringService, staffMembers, today, upsertWorkflow, workflowItemsFromQueue } from '../staffWorkflow';
+import { completeRecurringVisit, filterStaffItems, isRecurringService, today, upsertWorkflow, workflowItemsFromQueue } from '../staffWorkflow';
+import { useStaffMembers } from '../useStaffMembers';
 
 function ServiceCalendarPage() {
   const [items, setItems] = useState([]);
@@ -11,6 +12,7 @@ function ServiceCalendarPage() {
   const [focusedId, setFocusedId] = useState('');
   const [status, setStatus] = useState({ type: 'loading', message: 'Loading service calendar...' });
   const { normalizedQuery } = useStaffSearch();
+  const staffMembers = useStaffMembers();
 
   useEffect(() => {
     load();
@@ -42,16 +44,32 @@ function ServiceCalendarPage() {
     if (patch.status === 'Completed' && !window.confirm(recurring
       ? `Complete this maintenance visit for ${item.id}? The recurring maintenance record will remain active.`
       : `Mark ${item.id} as completed? It will move to Completed Work.`)) return;
-    const workflowPatch = recurring ? completeRecurringVisit(item, patch) : patch;
+    const scheduleChanged = patch.status !== 'Completed' && scheduleWasChanged(item, patch.schedule);
+    const noticePatch = scheduleChanged
+      ? {
+          scheduleChangedAt: new Date().toISOString(),
+          scheduleChangeNotice: `Schedule updated: ${formatScheduleNotice(patch.schedule)}${patch.schedule?.staff ? ` / ${patch.schedule.staff}` : ''}`,
+        }
+      : {};
+    const nextPatch = { ...patch, ...noticePatch };
+    const workflowPatch = recurring ? completeRecurringVisit(item, nextPatch) : nextPatch;
     const visits = workflowPatch.visits || item.visits;
     upsertWorkflow(item.id, { ...workflowPatch, visits });
-    if (item.kind !== 'Quotation') {
+    if (item.kind === 'Quotation') {
+      await schemaApi.updateStaffQuotation(item.id, {
+        status: workflowPatch.status || patch.status || item.status,
+        schedule: workflowPatch.schedule || patch.schedule || item.schedule || {},
+        remarks: 'Updated from Staff service calendar',
+        notifyCustomer: scheduleChanged,
+      });
+    } else {
       await schemaApi.updateStaffServiceRequest(item.id, {
         status: workflowPatch.status || patch.status || item.status,
         preferredDate: workflowPatch.schedule?.date || patch.schedule?.date || item.schedule?.date || '',
         preferredTime: workflowPatch.schedule?.time || patch.schedule?.time || item.schedule?.time || '',
         recurrenceFrequency: workflowPatch.recurrenceFrequency || item.recurrenceFrequency || 'One-time',
         remarks: 'Updated from Staff service calendar',
+        notifyCustomer: scheduleChanged,
       });
     }
     load(false);
@@ -74,7 +92,7 @@ function ServiceCalendarPage() {
         </div>
         <div className="divide-y divide-slate-100">
           {shown.map((item) => (
-            <CalendarRow key={item.id} item={item} onUpdate={update} focused={focusedId === item.id} />
+            <CalendarRow key={item.id} item={item} staffMembers={staffMembers} onUpdate={update} focused={focusedId === item.id} />
           ))}
           {!shown.length && status.type === 'idle' && <div className="px-6 py-10 text-sm text-slate-500">{normalizedQuery ? 'No scheduled records match your search.' : 'No scheduled services or maintenance visits yet.'}</div>}
         </div>
@@ -144,7 +162,7 @@ function ScheduleMonthCalendar({ items, monthDate, setMonthDate, onJump }) {
   );
 }
 
-function CalendarRow({ item, onUpdate, focused = false }) {
+function CalendarRow({ item, staffMembers, onUpdate, focused = false }) {
   const recurring = isRecurringService(item);
   const [draft, setDraft] = useState({
     date: item.schedule?.date || item.preferredDate || '',
@@ -189,6 +207,17 @@ function scheduleSortValue(item) {
 
 function hasFullSchedule(item) {
   return Boolean(item.schedule?.date && item.schedule?.time && item.schedule?.staff);
+}
+
+function scheduleWasChanged(item, schedule = {}) {
+  if (!schedule.date && !schedule.time && !schedule.staff) return false;
+  return (schedule.date || '') !== (item.schedule?.date || item.preferredDate || '')
+    || (schedule.time || '') !== (item.schedule?.time || item.preferredTime || '')
+    || (schedule.staff || '') !== (item.schedule?.staff || '');
+}
+
+function formatScheduleNotice(schedule = {}) {
+  return [schedule.date, schedule.time].filter(Boolean).join(' ') || 'Schedule pending';
 }
 
 function calendarDays(monthDate) {

@@ -88,11 +88,11 @@ export function upsertWorkflow(reference, patch) {
 export function overlayWorkflow(item) {
   const workflow = getWorkflow(item.id || item.referenceNumber) || {};
   const quotation = normalizeQuotation(workflow.quotation, item);
-  const status = workflow.status || item.status || 'Under Review';
+  const status = mergedWorkflowStatus(workflow.status, item.status, workflow.updatedAt, item.updatedAt);
   return {
     ...item,
     ...workflow,
-    status: status === 'Submitted' ? 'Under Review' : status,
+    status,
     quotation,
     schedule: workflow.schedule || scheduleFromItem(item),
     recurrenceFrequency: workflow.recurrenceFrequency || item.recurrenceFrequency || inferRecurrenceFrequency(item),
@@ -115,8 +115,13 @@ export function normalizeQuotation(quotation = {}, item = {}) {
         ? normalizeCharge({
             ...charge,
             type: 'Materials charge',
+            quotationProductItemId: charge.quotationProductItemId || material.quotationProductItemId,
+            productVariantId: charge.productVariantId || material.productVariantId,
             materialCode: charge.materialCode || material.materialCode,
             stockOnHand: material.stockOnHand,
+            description: material.description || charge.description,
+            quantity: material.quantity || charge.quantity,
+            unitPrice: usePersistedMaterialPrice(charge, material) ? material.unitPrice : charge.unitPrice,
             sourceItemKey: material.sourceItemKey,
           })
         : charge;
@@ -135,12 +140,13 @@ export function normalizeQuotation(quotation = {}, item = {}) {
     charges = removeDuplicateMaterialCharges(charges);
   }
 
-  const discount = money(quotation.discount);
+  const storedAdjustment = money(item.additionalCost);
+  const discount = money(quotation.discount ?? (storedAdjustment < 0 ? Math.abs(storedAdjustment) : 0));
   const subtotal = money(charges.reduce((sum, charge) => sum + charge.subtotal, 0));
 
   return {
     referenceNumber: quotation.referenceNumber || `QUO-${item.id || item.referenceNumber || Date.now()}`,
-    quotationDate: quotation.quotationDate || today(),
+    quotationDate: quotation.quotationDate || item.quotationDate || today(),
     validUntil: quotation.validUntil || '',
     notes: quotation.notes || '',
     terms: quotation.terms || 'Payment confirms acceptance of the quotation. Schedule is subject to staff availability.',
@@ -159,6 +165,8 @@ export function normalizeCharge(charge = {}) {
   return {
     id: charge.id || cryptoId(),
     type: charge.type || chargeTypes[0],
+    quotationProductItemId: charge.quotationProductItemId || '',
+    productVariantId: charge.productVariantId || '',
     materialCode,
     stockOnHand: stockOrNull(charge.stockOnHand),
     serviceName: charge.serviceName || '',
@@ -318,7 +326,20 @@ export function today() {
 
 function defaultCharges(item) {
   const materialCharges = materialChargesFromItems(item);
-  if (materialCharges.length) return materialCharges;
+  const adjustment = money(item.additionalCost);
+  if (materialCharges.length) {
+    return adjustment > 0
+      ? [
+          ...materialCharges,
+          normalizeCharge({
+            type: 'Other custom charge',
+            description: 'Additional project cost',
+            quantity: 1,
+            unitPrice: adjustment,
+          }),
+        ]
+      : materialCharges;
+  }
 
   const quoted = money(item.totalAmount || item.additionalCost);
   if (quoted > 0) {
@@ -344,6 +365,7 @@ function materialChargesFromItems(item) {
 
   return item.items.map((quotedItem, index) => {
     const sourceItemKey = [
+      quotedItem.quotationProductItemId,
       quotedItem.productVariantId,
       quotedItem.productCode,
       quotedItem.productName,
@@ -353,6 +375,8 @@ function materialChargesFromItems(item) {
     return normalizeCharge({
       id: `material-${item.id || item.referenceNumber || 'quote'}-${sourceItemKey || index}`,
       type: 'Materials charge',
+      quotationProductItemId: quotedItem.quotationProductItemId || '',
+      productVariantId: quotedItem.productVariantId || '',
       materialCode: quotedItem.productCode || '',
       stockOnHand: quotedItem.stock,
       description: materialDescription(quotedItem),
@@ -394,6 +418,57 @@ function sameMaterialCharge(material, charge) {
 
   return materialIdentity(material) === materialIdentity(charge)
     && Number(material.quantity) === Number(charge.quantity);
+}
+
+function mergedWorkflowStatus(localStatus, backendStatus, localUpdatedAt = '', backendUpdatedAt = '') {
+  const local = normalizeWorkflowStatus(localStatus);
+  const backend = normalizeWorkflowStatus(backendStatus);
+  if (local === 'Completed' && ['Ready for Payment', 'Customer Confirmed', 'Paid'].includes(backend)) return backend;
+  if (isNewerOrSame(backendUpdatedAt, localUpdatedAt)) return backend;
+  return workflowStatusRank(backend) >= workflowStatusRank(local) ? backend : local;
+}
+
+export function normalizeWorkflowStatus(status) {
+  const value = String(status || '').trim();
+  const normalized = value.toLowerCase();
+  if (normalized === 'submitted') return 'Under Review';
+  if (normalized === 'accepted' || normalized === 'approved' || normalized === 'ready for payment' || normalized === 'for payment') return 'Ready for Payment';
+  if (normalized === 'customer confirmed') return 'Customer Confirmed';
+  if (normalized === 'paid') return 'Paid';
+  if (normalized === 'scheduled') return 'Scheduled';
+  if (normalized === 'in progress') return 'In Progress';
+  if (normalized === 'completed') return 'Completed';
+  if (normalized === 'cancelled' || normalized === 'canceled') return 'Cancelled';
+  if (normalized === 'quotation draft' || normalized === 'draft') return 'Quotation Draft';
+  return value || 'Under Review';
+}
+
+function workflowStatusRank(status) {
+  return {
+    'Under Review': 2,
+    'Quotation Draft': 3,
+    'Ready for Payment': 4,
+    'Customer Confirmed': 5,
+    Paid: 6,
+    Scheduled: 7,
+    'In Progress': 8,
+    Completed: 9,
+    Cancelled: 10,
+  }[normalizeWorkflowStatus(status)] || 0;
+}
+
+function isNewerOrSame(primaryDate, secondaryDate) {
+  const primary = Date.parse(primaryDate || '');
+  const secondary = Date.parse(secondaryDate || '');
+  if (!Number.isFinite(primary) || !Number.isFinite(secondary)) return false;
+  return primary >= secondary;
+}
+
+function usePersistedMaterialPrice(charge, material) {
+  const persisted = Number(material.unitPrice);
+  if (!Number.isFinite(persisted) || persisted <= 0) return false;
+  const current = Number(charge.unitPrice);
+  return !Number.isFinite(current) || current <= 0;
 }
 
 function materialIdentity(charge) {

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Nav, Footer, PageIntro, InfoNote } from './components'
 import { serviceLines } from './data/company'
 import { getStoredSession, isSignedIn, schemaApi } from './services/katalaApi'
@@ -30,7 +30,44 @@ function localTimeNow() {
 }
 
 function isMaintenanceService(service) {
-  return typeMap[service.title] === 'Maintenance' || /maintenance|preventive/i.test(service.title)
+  return serviceType(service) === 'Maintenance' || /maintenance|preventive/i.test(service.title)
+}
+
+function serviceType(service) {
+  const value = service.category || typeMap[service.title] || 'Systems'
+  if (/maintenance|preventive/i.test(value)) return 'Maintenance'
+  if (/product|material/i.test(value)) return 'Products'
+  return value
+}
+
+function serviceKey(service) {
+  return String(service.title || '').trim().toLowerCase()
+}
+
+function dbServiceCards(services) {
+  return services
+    .filter((service) => service.active)
+    .map((service) => ({
+      title: service.name,
+      category: service.category || 'Systems',
+      copy: service.description || 'Customer-facing service details will be confirmed by Katala staff after review.',
+      proof: service.duration ? `Estimated duration: ${service.duration}` : 'Scope and schedule are confirmed after staff review.',
+      imageUrl: service.imageUrl || '',
+      minPrice: service.minPrice,
+      maxPrice: service.maxPrice,
+    }))
+}
+
+const peso = new Intl.NumberFormat('en-PH', { style: 'currency', currency: 'PHP' })
+
+function priceRangeLabel(item) {
+  const prices = [item.minPrice, item.maxPrice]
+    .filter((value) => value !== null && value !== undefined && Number(value) > 0)
+    .map(Number)
+  if (!prices.length) return 'After site review'
+  const min = Math.min(...prices)
+  const max = Math.max(...prices)
+  return min === max ? peso.format(min) : `${peso.format(min)} - ${peso.format(max)}`
 }
 
 function validatePreferredSchedule(preferredDate, preferredTime) {
@@ -68,15 +105,50 @@ const emptyServiceForm = {
 export default function Services() {
   const [filter, setFilter] = useState('All')
   const [selectedService, setSelectedService] = useState(null)
-  const shown = serviceLines.filter((item) => filter === 'All' || typeMap[item.title] === filter)
+  const [dbServices, setDbServices] = useState([])
+  const [catalogStatus, setCatalogStatus] = useState('')
+  const [signedIn, setSignedIn] = useState(() => isSignedIn())
+  const serviceItems = useMemo(() => {
+    const dbCards = dbServiceCards(dbServices)
+    const dbKeys = new Set(dbCards.map(serviceKey))
+    return [
+      ...dbCards,
+      ...serviceLines.filter((item) => !dbKeys.has(serviceKey(item))),
+    ]
+  }, [dbServices])
+  const shown = serviceItems.filter((item) => filter === 'All' || serviceType(item) === filter)
 
   useEffect(() => {
-    if (!isSignedIn()) return
+    const sync = () => setSignedIn(isSignedIn())
+    window.addEventListener('katala-auth-changed', sync)
+    window.addEventListener('storage', sync)
+    return () => {
+      window.removeEventListener('katala-auth-changed', sync)
+      window.removeEventListener('storage', sync)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!signedIn) return
     const pendingTitle = sessionStorage.getItem('katala-pending-service')
     if (!pendingTitle) return
-    const pending = serviceLines.find((item) => item.title === pendingTitle)
+    const pending = serviceItems.find((item) => item.title === pendingTitle)
     sessionStorage.removeItem('katala-pending-service')
     if (pending) setSelectedService(pending)
+  }, [serviceItems, signedIn])
+
+  useEffect(() => {
+    let cancelled = false
+    schemaApi.listCatalogServices()
+      .then((data) => {
+        if (cancelled) return
+        setDbServices(data.services || [])
+        setCatalogStatus('')
+      })
+      .catch(() => {
+        if (!cancelled) setCatalogStatus('Service catalog is temporarily showing the default list.')
+      })
+    return () => { cancelled = true }
   }, [])
 
   function askAboutService(item) {
@@ -111,21 +183,24 @@ export default function Services() {
                 <article className="service-card" key={item.title}>
                   <div className="service-card-top">
                     <span>Service category</span>
-                    <strong>{typeMap[item.title]}</strong>
+                    <strong>{serviceType(item)}</strong>
                   </div>
+                  {item.imageUrl && <img className="service-card-image" src={item.imageUrl} alt="" />}
                   <h2>{item.title}</h2>
                   <p>{item.copy}</p>
                   <div className="service-estimate">
                     <span>Estimated pricing</span>
-                    <strong>After site review</strong>
+                    <strong>{priceRangeLabel(item)}</strong>
                   </div>
                   <div className="proof-box">
                     <span>How we can help</span>
                     {item.proof}
                   </div>
-                  <button className="btn secondary full service-inquiry-btn" type="button" onClick={() => askAboutService(item)}>
-                    Request service consultation
-                  </button>
+                  {signedIn && (
+                    <button className="btn secondary full service-inquiry-btn" type="button" onClick={() => askAboutService(item)}>
+                      Request service consultation
+                    </button>
+                  )}
                 </article>
               ))}
             </div>
@@ -133,6 +208,7 @@ export default function Services() {
             <InfoNote title="Not sure which service to choose?">
               Select the closest category and describe the site condition or requirement. Katala can review the details and advise what information is needed next.
             </InfoNote>
+            {catalogStatus && <div className="form-status loading">{catalogStatus}</div>}
           </div>
         </section>
       </main>
@@ -198,10 +274,6 @@ function ServiceRequestModal({ service, onClose }) {
       setStatus({ type: 'error', message: 'Contact person is required.', referenceNumber: '' })
       return
     }
-    if (!/^[+()\d\s.-]{7,30}$/.test(form.contactNumber.trim())) {
-      setStatus({ type: 'error', message: 'Enter a valid contact number.', referenceNumber: '' })
-      return
-    }
     if (!form.projectAddress.trim()) {
       setStatus({ type: 'error', message: 'Service address is required.', referenceNumber: '' })
       return
@@ -245,7 +317,6 @@ function ServiceRequestModal({ service, onClose }) {
                 <label>Project name<input maxLength="160" name="projectName" value={form.projectName} onChange={update} /></label>
                 <label>Establishment / organization<input maxLength="160" name="establishmentName" value={form.establishmentName} onChange={update} /></label>
                 <label>Contact person<input required maxLength="160" name="contactPerson" value={form.contactPerson} onChange={update} /></label>
-                <label>Contact number<input required maxLength="60" name="contactNumber" value={form.contactNumber} onChange={update} /></label>
                 <label className="wide">Service requirement / problem description<textarea required minLength="5" maxLength="2500" rows="4" name="problemDescription" value={form.problemDescription} onChange={update} placeholder="Describe the equipment, issue, requested work, or site concern." /></label>
                 <label className="wide">Project address<textarea required maxLength="1000" rows="2" name="projectAddress" value={form.projectAddress} onChange={update} /></label>
                 <label>

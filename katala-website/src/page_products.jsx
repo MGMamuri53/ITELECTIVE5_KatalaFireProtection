@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Nav, Footer, PageIntro, InfoNote } from './components'
-import { catalog, categories } from './data/catalog'
+import { catalog, categories as baseCategories } from './data/catalog'
 import { isSignedIn, schemaApi } from './services/katalaApi'
 
 import extinguisherImage from './assets/pictures/06a07516-5478-4ffa-8cc9-27c057371c58.jpg'
@@ -26,7 +26,7 @@ const imageByCategory = {
 }
 
 function productImage(product) {
-  return imageByCategory[product.category] || facilityImage
+  return product.imageUrl || imageByCategory[product.category] || facilityImage
 }
 
 function loadJson(key, fallback) {
@@ -41,7 +41,7 @@ function loadJson(key, fallback) {
 function normalizeCart(value) {
   if (!Array.isArray(value)) return []
   return value
-    .filter((line) => catalog.some((product) => product.id === line.productId))
+    .filter((line) => line && line.productId)
     .map((line) => ({
       productId: String(line.productId),
       variant: typeof line.variant === 'string' ? line.variant : '',
@@ -67,6 +67,19 @@ function formatPeso(value) {
   return peso.format(Number(value || 0))
 }
 
+function priceRangeLabel(item, variant = '') {
+  const variants = item.variantDetails || []
+  const selected = variant ? variants.find((entry) => entry.label === variant) : null
+  const prices = (selected ? [selected] : variants)
+    .flatMap((entry) => [entry.minPrice, entry.maxPrice])
+    .filter((value) => value !== null && value !== undefined && Number(value) > 0)
+    .map(Number)
+  if (!prices.length) return 'Ask staff for pricing'
+  const min = Math.min(...prices)
+  const max = Math.max(...prices)
+  return min === max ? formatPeso(min) : `${formatPeso(min)} - ${formatPeso(max)}`
+}
+
 function displayQuotationStatus(status) {
   const value = String(status || '').trim()
   const normalized = value.toLowerCase()
@@ -81,6 +94,14 @@ function normalizeKey(value) {
 }
 
 function stockLabel(product, materials) {
+  if (product.variantDetails?.length) {
+    const knownStock = product.variantDetails
+      .map((item) => item.stock)
+      .filter((value) => value !== null && value !== undefined)
+    if (!knownStock.length) return 'Database stock: available for quotation'
+    const total = knownStock.reduce((sum, value) => sum + Number(value || 0), 0)
+    return `${total} unit${total === 1 ? '' : 's'} available in database`
+  }
   if (!materials.length) return 'Database stock: checking availability on submission'
   const matches = materials.filter((material) => {
     const sameName = normalizeKey(material.name) === normalizeKey(product.name)
@@ -96,6 +117,61 @@ function stockLabel(product, materials) {
   return `${total} unit${total === 1 ? '' : 's'} available in database`
 }
 
+function variantStockLabel(product, variant) {
+  const details = (product.variantDetails || []).find((entry) => entry.label === variant)
+  if (!details) return 'Stock: confirm with Katala'
+  if (details.stock === null || details.stock === undefined) return 'Stock: available for quotation'
+  const stock = Number(details.stock || 0)
+  return `${stock} unit${stock === 1 ? '' : 's'} available`
+}
+
+function selectedVariantDetail(product, variant) {
+  return (product.variantDetails || []).find((entry) => entry.label === variant) || null
+}
+
+function materialProductKey(product) {
+  return [product.name].map(normalizeKey).join('::')
+}
+
+function materialProducts(materials) {
+  const groups = new Map()
+  materials
+    .filter((material) => material.active)
+    .forEach((material) => {
+      const model = material.model || ''
+      const key = [material.productId || material.name].map(normalizeKey).join('::')
+      const variant = [model, material.size].filter(Boolean).join(' / ') || material.sku || material.unit || 'Standard'
+      const current = groups.get(key) || {
+        id: `db-${material.productId || material.variantId}`,
+        model: model || material.sku || '',
+        name: material.name,
+        category: material.category || 'Uncategorized',
+        profileLabel: material.description || material.unit || 'Katala catalog material',
+        variants: [],
+        variantDetails: [],
+        imageUrl: material.imageUrl || '',
+        sourcePage: null,
+      }
+      if (variant && !current.variants.includes(variant)) current.variants.push(variant)
+      if (variant) {
+        current.variantDetails.push({
+          label: variant,
+          variantId: material.variantId,
+          sku: material.sku,
+          model: material.model || '',
+          size: material.size || '',
+          unit: material.unit || '',
+          stock: material.stock,
+          minPrice: material.minPrice,
+          maxPrice: material.maxPrice,
+        })
+      }
+      if (!current.imageUrl && material.imageUrl) current.imageUrl = material.imageUrl
+      groups.set(key, current)
+    })
+  return [...groups.values()]
+}
+
 export default function Products() {
   const [query, setQuery] = useState('')
   const [category, setCategory] = useState('All')
@@ -108,9 +184,26 @@ export default function Products() {
   const [quotationRefs, setQuotationRefs] = useState(() => loadJson(QUOTATION_REFS_KEY, []))
   const [pendingAdd, setPendingAdd] = useState(null)
   const [returnPaymentReference, setReturnPaymentReference] = useState('')
+  const [signedIn, setSignedIn] = useState(() => isSignedIn())
 
   useEffect(() => localStorage.setItem(CART_KEY, JSON.stringify(cart)), [cart])
   useEffect(() => localStorage.setItem(QUOTATION_REFS_KEY, JSON.stringify(quotationRefs)), [quotationRefs])
+
+  useEffect(() => {
+    const sync = () => setSignedIn(isSignedIn())
+    window.addEventListener('katala-auth-changed', sync)
+    window.addEventListener('storage', sync)
+    return () => {
+      window.removeEventListener('katala-auth-changed', sync)
+      window.removeEventListener('storage', sync)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (signedIn) return
+    setCartOpen(false)
+    setPendingAdd(null)
+  }, [signedIn])
 
   useEffect(() => {
     let cancelled = false
@@ -142,14 +235,31 @@ export default function Products() {
     if (isSignedIn()) setManageOpen(true)
   }, [])
 
+  const catalogItems = useMemo(() => {
+    const dbProducts = materialProducts(dbMaterials)
+    const dbKeys = new Set(dbProducts.map(materialProductKey))
+    return [
+      ...dbProducts,
+      ...catalog.filter((item) => !dbKeys.has(materialProductKey(item))),
+    ]
+  }, [dbMaterials])
+
   const products = useMemo(() => {
     const q = query.trim().toLowerCase()
-    return catalog.filter((item) => {
+    return catalogItems.filter((item) => {
       const matchesCategory = category === 'All' || item.category === category
       const matchesQuery = !q || [item.name, item.model, item.profileLabel, item.category, ...item.variants].join(' ').toLowerCase().includes(q)
       return matchesCategory && matchesQuery
     })
-  }, [query, category])
+  }, [catalogItems, query, category])
+
+  const categories = useMemo(() => {
+    const values = new Set(baseCategories.filter((item) => item !== 'All'))
+    dbMaterials.forEach((item) => {
+      if (item.active && item.category) values.add(item.category)
+    })
+    return ['All', ...values]
+  }, [dbMaterials])
 
   const cartCount = cart.reduce((sum, line) => sum + line.quantity, 0)
 
@@ -215,14 +325,16 @@ export default function Products() {
             <div className="catalog-toolbar">
               <div className="catalog-summary"><strong>{products.length}</strong> item{products.length === 1 ? '' : 's'} shown</div>
               <div className="catalog-actions">
-                {quotationRefs.length > 0 && (
+                {signedIn && quotationRefs.length > 0 && (
                   <button className="btn secondary compact-btn" type="button" onClick={() => { if (!isSignedIn()) { sessionStorage.setItem('katala-return-after-auth', 'products'); location.hash = 'signin'; return } setManageOpen(true) }}>
                     Manage quotation
                   </button>
                 )}
-                <button className="btn primary cart-button" type="button" onClick={() => setCartOpen(true)}>
-                  Cart <span className="cart-count" aria-label={`${cartCount} items in cart`}>{cartCount}</span>
-                </button>
+                {signedIn && (
+                  <button className="btn primary cart-button" type="button" onClick={() => setCartOpen(true)}>
+                    Cart <span className="cart-count" aria-label={`${cartCount} items in cart`}>{cartCount}</span>
+                  </button>
+                )}
               </div>
             </div>
 
@@ -239,13 +351,13 @@ export default function Products() {
                       <p className="model-line">{item.model}</p>
                       <div className="product-price">
                         <span>Estimated pricing</span>
-                        <strong>For staff review</strong>
+                        <strong>{priceRangeLabel(item)}</strong>
                       </div>
                       <p className="stock-line">{stockLabel(item, dbMaterials)}</p>
                       {item.variants.length > 0 && <p className="variant-preview">Shown options: {item.variants.join(', ')}</p>}
                       <div className="product-card-actions">
                         <button className="btn secondary full" type="button" onClick={() => setSelected(item)}>View specifications</button>
-                        <button className="btn primary full" type="button" onClick={() => requestAddToCart(item, item.variants[0] || '', 1)}>Add to cart</button>
+                        {signedIn && <button className="btn primary full" type="button" onClick={() => requestAddToCart(item, item.variants[0] || '', 1)}>Add to cart</button>}
                       </div>
                     </div>
                   </article>
@@ -259,9 +371,11 @@ export default function Products() {
               </div>
             )}
 
-            <InfoNote title="Quotation cart">
-              Add the products you want to review, adjust quantities in the cart, then submit one quotation request. Katala will confirm the final product configuration, pricing, and availability.
-            </InfoNote>
+            {signedIn && (
+              <InfoNote title="Quotation cart">
+                Add the products you want to review, adjust quantities in the cart, then submit one quotation request. Katala will confirm the final product configuration, pricing, and availability.
+              </InfoNote>
+            )}
             {catalogStatus && <div className="form-status loading">{catalogStatus}</div>}
           </div>
         </section>
@@ -272,15 +386,17 @@ export default function Products() {
         <ProductModal
           product={selected}
           image={productImage(selected)}
+          canAddToCart={signedIn}
           onClose={() => setSelected(null)}
           onAdd={(variant, quantity, openCart) => requestAddToCart(selected, variant, quantity, openCart, openCart)}
         />
       )}
 
-      {cartOpen && (
+      {signedIn && cartOpen && (
         <CartModal
           cart={cart}
           setCart={setCart}
+          catalogItems={catalogItems}
           onClose={() => setCartOpen(false)}
           onQuotationCreated={saveQuotationReference}
           onManageQuotation={() => {
@@ -300,7 +416,7 @@ export default function Products() {
         />
       )}
 
-      {pendingAdd && (
+      {signedIn && pendingAdd && (
         <AddToCartConfirmModal
           item={pendingAdd}
           onChange={(patch) =>
@@ -314,9 +430,8 @@ export default function Products() {
   )
 }
 
-function ProductModal({ product, image, onClose, onAdd }) {
-  const [variant, setVariant] = useState(product.variants[0] || '')
-  const [quantity, setQuantity] = useState(1)
+function ProductModal({ product, image, onClose }) {
+  const variant = product.variants[0] || ''
   const closeRef = useRef(null)
 
   useEffect(() => {
@@ -347,33 +462,13 @@ function ProductModal({ product, image, onClose, onAdd }) {
               <div><span>Model / reference</span><strong>{product.model}</strong></div>
               <div><span>Product description</span><strong>{product.profileLabel}</strong></div>
               <div><span>Listed options</span><strong>{product.variants.length ? product.variants.join(', ') : 'Configuration to be confirmed'}</strong></div>
-              <div><span>Estimated price</span><strong>Final amount after staff review</strong></div>
-              <div><span>Availability</span><strong>Confirm with Katala</strong></div>
+              <div><span>Estimated price</span><strong>{priceRangeLabel(product, variant)}</strong></div>
+              <div><span>Availability</span><strong>{variantStockLabel(product, variant)}</strong></div>
             </div>
 
             <div className="honesty-box">
               <strong>Before requesting a quote</strong>
               <p>Include the intended application and any project-specific requirements so Katala can confirm the suitable configuration, supporting documents, availability, and final price.</p>
-            </div>
-
-            <div className="quick-cart-fields">
-              {product.variants.length > 0 && (
-                <label>
-                  Option
-                  <select value={variant} onChange={(e) => setVariant(e.target.value)}>
-                    {product.variants.map((value) => <option key={value}>{value}</option>)}
-                  </select>
-                </label>
-              )}
-              <label>
-                Quantity
-                <input type="number" min="1" max="999" step="1" value={quantity} onChange={(e) => setQuantity(e.target.value)} />
-              </label>
-            </div>
-
-            <div className="modal-cart-actions">
-              <button className="btn secondary" type="button" onClick={() => onAdd(variant, quantity, false)}>Add to cart</button>
-              <button className="btn primary" type="button" onClick={() => onAdd(variant, quantity, true)}>Add & review cart</button>
             </div>
           </div>
         </div>
@@ -501,6 +596,14 @@ function AddToCartConfirmModal({ item, onChange, onCancel, onConfirm }) {
               <strong>Quantity:</strong>{' '}
               {Number.parseInt(item.quantity, 10) || 1}
             </span>
+            <span>
+              <strong>Available stock:</strong>{' '}
+              {variantStockLabel(item.product, item.variant).replace(/^Stock:\s*/i, '')}
+            </span>
+            <span>
+              <strong>Estimated price:</strong>{' '}
+              {priceRangeLabel(item.product, item.variant)}
+            </span>
           </div>
 
           <p className="muted">
@@ -531,7 +634,7 @@ function AddToCartConfirmModal({ item, onChange, onCancel, onConfirm }) {
   )
 }
 
-function CartModal({ cart, setCart, onClose, onQuotationCreated, onManageQuotation }) {
+function CartModal({ cart, setCart, catalogItems, onClose, onQuotationCreated, onManageQuotation }) {
   const [showCheckout, setShowCheckout] = useState(false)
   const [form, setForm] = useState(emptyCheckout)
   const [status, setStatus] = useState({ type: 'idle', message: '', referenceNumber: '' })
@@ -550,7 +653,7 @@ function CartModal({ cart, setCart, onClose, onQuotationCreated, onManageQuotati
   }, [onClose])
 
   const lines = cart
-    .map((line) => ({ ...line, product: catalog.find((item) => item.id === line.productId) }))
+    .map((line) => ({ ...line, product: catalogItems.find((item) => item.id === line.productId) || catalog.find((item) => item.id === line.productId) }))
     .filter((line) => line.product)
   const totalUnits = lines.reduce((sum, line) => sum + line.quantity, 0)
 
@@ -575,9 +678,10 @@ function CartModal({ cart, setCart, onClose, onQuotationCreated, onManageQuotati
       const data = await schemaApi.createQuotation({
         ...form,
         items: lines.map((line) => ({
+          productVariantId: selectedVariantDetail(line.product, line.variant)?.variantId || '',
           productName: line.product.name,
-          productModel: dbSafeModel(line.product.model),
-          productSize: line.variant || '',
+          productModel: dbSafeModel(selectedVariantDetail(line.product, line.variant)?.model || line.product.model),
+          productSize: selectedVariantDetail(line.product, line.variant)?.size || line.variant || '',
           quantity: Number(line.quantity),
           itemDescription: line.product.profileLabel || '',
         })),
@@ -607,7 +711,7 @@ function CartModal({ cart, setCart, onClose, onQuotationCreated, onManageQuotati
             <div><span className="eyebrow">YOUR CART</span><h2 id="cart-title">Quotation request</h2></div>
             <div className="cart-heading-total">
               <strong>{totalUnits} item{totalUnits === 1 ? '' : 's'}</strong>
-              <span>Estimated amount after staff review</span>
+              <span>Estimated pricing appears per material option</span>
             </div>
           </div>
 
@@ -619,7 +723,7 @@ function CartModal({ cart, setCart, onClose, onQuotationCreated, onManageQuotati
                   <div className="cart-line-copy">
                     <strong>{line.product.name}</strong>
                     <span>{line.product.model}</span>
-                    <span>Material pricing will be set by Katala staff.</span>
+                    <span>{variantStockLabel(line.product, line.variant)} / {priceRangeLabel(line.product, line.variant)}</span>
                     {line.product.variants.length > 0 && (
                       <label>
                         Option
@@ -938,7 +1042,7 @@ function ReceiptModal({ receipt, onClose }) {
             {receipt.items?.map((item, index) => (
               <div key={`${item.productCode || item.productName}-${index}`}>
                 <div>
-                  <strong>{item.productName}</strong>
+                  <strong>{item.productCode || item.productName || 'Quoted item'}</strong>
                   <span>{item.productSize || item.productModel || item.productCode || 'Item'} - Qty {item.quantity}</span>
                 </div>
                 <span>{formatPeso(item.lineTotal)}</span>
