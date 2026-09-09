@@ -47,6 +47,25 @@ https://your-domain.com/api/paymongo/webhook
 
 The customer payment flow starts from an accepted, priced quotation. After PayMongo confirms payment, the receipt is loaded from `tbl_paymenttransaction` and the related quotation rows.
 
+## Xendit Test Mode Checkout
+
+For Xendit test payments, keep the Xendit dashboard in **Test Mode** and create a test secret key from **Settings > API Keys**. Store the secret key only on the API server:
+
+```env
+XENDIT_SECRET_KEY=xnd_development_...
+XENDIT_WEBHOOK_TOKEN=webhook_verification_token
+XENDIT_PAYMENT_CHANNELS=CARDS,GCASH,PAYMAYA,QRPH
+APP_ORIGIN=https://your-ngrok-or-deployed-url
+```
+
+The Xendit payment flow uses Payment Sessions in hosted `PAYMENT_LINK` mode. Register this webhook URL in Xendit while testing:
+
+```text
+https://your-ngrok-or-deployed-url/api/xendit/webhook
+```
+
+Local `http://localhost` can create test sessions, but Xendit return URLs must be HTTPS. Use a temporary HTTPS tunnel such as ngrok for end-to-end local testing.
+
 ## Staff and Administrator Access
 
 The sign-in page supports Customer, Staff, and Administrator portals. Staff/admin accounts must have a Supabase Auth role in `app_metadata.role` or `user_metadata.role` set to `staff` or `admin`.

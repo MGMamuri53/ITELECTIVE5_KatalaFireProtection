@@ -31,6 +31,12 @@ const paymongoMethods = (process.env.PAYMONGO_PAYMENT_METHODS || 'card,gcash,qrp
   .map((method) => method.trim())
   .filter(Boolean)
 const paymongoPassOnFees = String(process.env.PAYMONGO_PASS_ON_FEES || '').toLowerCase() === 'true'
+const xenditSecretKey = (process.env.XENDIT_SECRET_KEY || '').trim()
+const xenditWebhookToken = (process.env.XENDIT_WEBHOOK_TOKEN || '').trim()
+const xenditPaymentChannels = (process.env.XENDIT_PAYMENT_CHANNELS || 'CARDS,GCASH,PAYMAYA,QRPH')
+  .split(',')
+  .map((channel) => channel.trim().toUpperCase())
+  .filter(Boolean)
 
 function mysqlPlaceholders(sql, params = []) {
   const nextParams = []
@@ -1848,6 +1854,7 @@ function quotationDto(row, items = [], payment = null) {
     canPay: isPayableQuotationStatus(quotationStatus)
       && totals.totalAmount > 0,
     paymongoConfigured: Boolean(paymongoSecretKey),
+    xenditConfigured: Boolean(xenditSecretKey),
     payment: paymentStatusDto(payment),
     items,
   }
@@ -2054,7 +2061,9 @@ async function handleCancelQuotation(req, res, userId, referenceNumber) {
   return sendJson(res, 200, { ok: true, message: 'Quotation request cancelled.' })
 }
 
-function publicAppBase(req) {
+function publicAppBase(req, options = {}) {
+  if (options.preferConfiguredHttps && /^https:\/\//i.test(appOrigin)) return appOrigin
+
   const origin = req.headers.origin && /^https?:\/\//i.test(req.headers.origin)
     ? req.headers.origin
     : appOrigin
@@ -2065,8 +2074,17 @@ function paymongoAuthHeader() {
   return `Basic ${Buffer.from(`${paymongoSecretKey}:`).toString('base64')}`
 }
 
+function xenditAuthHeader() {
+  return `Basic ${Buffer.from(`${xenditSecretKey}:`).toString('base64')}`
+}
+
 function paymongoApiError(data, fallback) {
   const detail = data?.errors?.[0]?.detail || data?.errors?.[0]?.message || data?.error
+  return clean(detail || fallback, 1000)
+}
+
+function xenditApiError(data, fallback) {
+  const detail = data?.message || data?.error_message || data?.errors?.[0]?.message || data?.error_code
   return clean(detail || fallback, 1000)
 }
 
@@ -2090,6 +2108,31 @@ async function paymongoRequest(path, options = {}) {
     const error = new Error('PAYMONGO_API_ERROR')
     error.statusCode = response.status >= 500 ? 502 : 400
     error.publicMessage = paymongoApiError(data, 'PayMongo rejected the payment request.')
+    throw error
+  }
+  return data
+}
+
+async function xenditRequest(path, options = {}) {
+  if (!xenditSecretKey) {
+    const error = new Error('XENDIT_NOT_CONFIGURED')
+    error.statusCode = 503
+    throw error
+  }
+
+  const response = await fetch(`https://api.xendit.co${path}`, {
+    ...options,
+    headers: {
+      'Authorization': xenditAuthHeader(),
+      'Content-Type': 'application/json',
+      ...(options.headers || {}),
+    },
+  })
+  const data = await response.json().catch(() => ({}))
+  if (!response.ok) {
+    const error = new Error('XENDIT_API_ERROR')
+    error.statusCode = response.status >= 500 ? 502 : 400
+    error.publicMessage = xenditApiError(data, 'Xendit rejected the payment request.')
     throw error
   }
   return data
@@ -2121,6 +2164,59 @@ function checkoutLineItems(quotation) {
       currency: 'PHP',
       quantity: 1,
       description: 'Additional reviewed cost from Katala quotation',
+    })
+  }
+  return items
+}
+
+function xenditReference(value, fallback = 'KATALA') {
+  const normalized = String(value || '')
+    .replace(/[^A-Za-z0-9]/g, '')
+    .slice(0, 64)
+  return normalized || fallback
+}
+
+function xenditName(value, fallback) {
+  const normalized = String(value || '')
+    .replace(/[^A-Za-z0-9 ]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 50)
+  return normalized || fallback
+}
+
+function xenditPhone(value) {
+  const digits = String(value || '').replace(/\D/g, '')
+  if (!digits) return undefined
+  if (digits.startsWith('63')) return `+${digits}`
+  if (digits.startsWith('0')) return `+63${digits.slice(1)}`
+  return `+63${digits}`
+}
+
+function xenditCheckoutItems(quotation) {
+  const items = quotation.items
+    .map((item, index) => ({
+      reference_id: xenditReference(item.productCode || `${quotation.referenceNumber}${index}`, `ITEM${index + 1}`),
+      name: clean([item.productName, item.productSize || item.productModel].filter(Boolean).join(' - '), 255) || 'Katala quotation item',
+      description: clean(item.itemDescription || item.productCode || 'Katala quotation item', 255),
+      type: 'PHYSICAL_PRODUCT',
+      category: 'Construction Materials',
+      net_unit_amount: toMoneyNumber(item.unitPrice),
+      quantity: Math.max(1, Number(item.quantity || 1)),
+      currency: 'PHP',
+    }))
+    .filter((item) => item.net_unit_amount > 0)
+
+  if (quotation.additionalCost > 0) {
+    items.push({
+      reference_id: xenditReference(`${quotation.referenceNumber}FEE`, 'FEE'),
+      name: 'Additional project cost',
+      description: 'Reviewed quotation adjustment',
+      type: 'FEE',
+      category: 'Service Fee',
+      net_unit_amount: toMoneyNumber(quotation.additionalCost),
+      quantity: 1,
+      currency: 'PHP',
     })
   }
   return items
@@ -2161,6 +2257,132 @@ async function loadPayableQuotation(client, userId, referenceNumber) {
   }))
 
   return quotationDto(quotation.rows[0], mappedItems)
+}
+
+async function handleCreateXenditCheckout(req, res, userId, referenceNumber) {
+  if (!(await requirePaymentTableReady(res))) return
+  if (!xenditSecretKey) return sendJson(res, 503, { error: 'Xendit is not configured yet. Set XENDIT_SECRET_KEY in .env.' })
+
+  const result = await transaction(async (client) => {
+    await ensureUserExists(client, userId)
+    const quotation = await loadPayableQuotation(client, userId, referenceNumber)
+    if (!quotation) return { notFound: true }
+    if (!quotation.canPay) return { notPayable: quotation }
+
+    const activePayment = await client.query(
+      `SELECT *
+         FROM public.tbl_paymenttransaction
+        WHERE v_userid = $1
+          AND v_quotationid = (
+            SELECT v_quotationid FROM public.tbl_quotation WHERE v_userid = $1 AND v_referencenumber = $2 LIMIT 1
+          )
+          AND v_status IN ('Pending', 'Paid')
+        ORDER BY v_createdat DESC
+        LIMIT 1`,
+      [userId, referenceNumber],
+    )
+    if (activePayment.rowCount && activePayment.rows[0].v_status === 'Paid') return { alreadyPaid: activePayment.rows[0] }
+    if (activePayment.rowCount && activePayment.rows[0].v_checkouturl) return { existing: activePayment.rows[0] }
+
+    const paymentReference = transactionReference(referenceNumber)
+    const inserted = await client.query(
+      `INSERT INTO public.tbl_paymenttransaction
+        (v_quotationid, v_userid, v_referencenumber, v_status, v_amount, v_currency, v_paymentmethod)
+       SELECT v_quotationid, v_userid, $3, 'Pending', $4, 'PHP', 'Xendit Payment Link'
+         FROM public.tbl_quotation
+        WHERE v_userid = $1
+          AND v_referencenumber = $2
+       RETURNING *`,
+      [userId, referenceNumber, paymentReference, quotation.totalAmount],
+    )
+
+    const base = publicAppBase(req, { preferConfiguredHttps: true })
+    const hasHttpsReturn = /^https:\/\//i.test(base)
+    const user = await client.query(
+      `SELECT v_firstname, v_lastname, v_emailaddress, v_contactnumber
+         FROM public.tbl_user
+        WHERE v_userid = $1
+        LIMIT 1`,
+      [userId],
+    )
+    const customer = user.rows[0] || {}
+    const firstName = xenditName(customer.v_firstname, 'Katala')
+    const lastName = xenditName(customer.v_lastname, 'Customer')
+
+    const xendit = await xenditRequest('/sessions', {
+      method: 'POST',
+      body: JSON.stringify({
+        reference_id: paymentReference,
+        session_type: 'PAY',
+        mode: 'PAYMENT_LINK',
+        amount: toMoneyNumber(quotation.totalAmount),
+        currency: 'PHP',
+        country: 'PH',
+        customer: {
+          reference_id: xenditReference(userId, 'CUSTOMER'),
+          type: 'INDIVIDUAL',
+          email: customer.v_emailaddress || undefined,
+          mobile_number: xenditPhone(customer.v_contactnumber),
+          individual_detail: {
+            given_names: firstName,
+            surname: lastName,
+          },
+        },
+        items: xenditCheckoutItems(quotation),
+        capture_method: 'AUTOMATIC',
+        locale: 'en',
+        allowed_payment_channels: xenditPaymentChannels.length ? xenditPaymentChannels : undefined,
+        description: `Katala quotation ${referenceNumber}`,
+        success_return_url: hasHttpsReturn ? `${base}/?payment_reference=${encodeURIComponent(paymentReference)}#products` : undefined,
+        cancel_return_url: hasHttpsReturn ? `${base}/?payment_cancelled=${encodeURIComponent(paymentReference)}#products` : undefined,
+        metadata: {
+          quotation_reference: referenceNumber,
+          payment_reference: paymentReference,
+          user_id: userId,
+          provider: 'xendit',
+        },
+      }),
+    })
+
+    const updated = await client.query(
+      `UPDATE public.tbl_paymenttransaction
+          SET v_paymongo_checkoutsessionid = $2,
+              v_paymongo_paymentintentid = $3,
+              v_paymongo_paymentid = $4,
+              v_checkouturl = $5,
+              v_rawpayload = $6,
+              v_updatedat = NOW()
+        WHERE v_paymenttransactionid = $1
+       RETURNING *`,
+      [
+        inserted.rows[0].v_paymenttransactionid,
+        xendit.payment_session_id || null,
+        xendit.payment_request_id || null,
+        xendit.payment_id || null,
+        xendit.payment_link_url || null,
+        xendit,
+      ],
+    )
+
+    return { payment: updated.rows[0], checkoutUrl: xendit.payment_link_url }
+  })
+
+  if (result.notFound) return sendJson(res, 404, { error: 'Quotation not found.' })
+  if (result.notPayable) {
+    return sendJson(res, 409, {
+      error: 'This quotation is not ready for payment yet. It needs a positive item price before Xendit checkout can start.',
+      quotation: result.notPayable,
+    })
+  }
+  if (result.alreadyPaid) return sendJson(res, 409, { error: 'This quotation has already been paid.', payment: paymentStatusDto(result.alreadyPaid) })
+  if (!result.checkoutUrl && !result.existing?.v_checkouturl) return sendJson(res, 502, { error: 'Xendit did not return a checkout URL.' })
+
+  const payment = result.payment || result.existing
+  return sendJson(res, 201, {
+    ok: true,
+    checkoutUrl: result.checkoutUrl || result.existing.v_checkouturl,
+    payment: paymentStatusDto(payment),
+  })
 }
 
 async function handleCreatePaymongoCheckout(req, res, userId, referenceNumber) {
@@ -2490,6 +2712,84 @@ async function refreshPaymentFromPaymongo(payment) {
   return await updatePaymentFromCheckout(paymongo.data, paymongo) || payment
 }
 
+function verifyXenditWebhookToken(tokenHeader) {
+  if (!xenditWebhookToken) return process.env.NODE_ENV !== 'production'
+  if (!tokenHeader) return false
+  const expectedBuffer = Buffer.from(xenditWebhookToken)
+  const receivedBuffer = Buffer.from(String(tokenHeader).trim())
+  return expectedBuffer.length === receivedBuffer.length && timingSafeEqual(expectedBuffer, receivedBuffer)
+}
+
+function xenditSessionFromPayload(payload) {
+  if (payload?.data?.payment_session_id) return payload.data
+  if (payload?.payment_session_id) return payload
+  return null
+}
+
+function xenditPaymentStatus(session) {
+  const status = String(session?.status || '').toUpperCase()
+  if (status === 'COMPLETED' || status === 'SUCCEEDED') return 'Paid'
+  if (status === 'EXPIRED') return 'Expired'
+  if (status === 'CANCELED' || status === 'CANCELLED') return 'Cancelled'
+  if (status === 'FAILED') return 'Failed'
+  return 'Pending'
+}
+
+async function updatePaymentFromXenditSession(session, rawPayload = null) {
+  if (!session) return null
+  if (!(await paymentTableExists())) return null
+
+  const paymentReference = session.reference_id || session.metadata?.payment_reference || null
+  const sessionId = session.payment_session_id || null
+  if (!paymentReference && !sessionId) return null
+
+  const status = xenditPaymentStatus(session)
+  const result = await pool.query(
+    `UPDATE public.tbl_paymenttransaction
+        SET v_status = $3,
+            v_paymongo_checkoutsessionid = COALESCE(v_paymongo_checkoutsessionid, $4),
+            v_paymongo_paymentintentid = COALESCE($5, v_paymongo_paymentintentid),
+            v_paymongo_paymentid = COALESCE($6, v_paymongo_paymentid),
+            v_paymentmethod = COALESCE(v_paymentmethod, 'Xendit Payment Link'),
+            v_checkouturl = COALESCE(v_checkouturl, $7),
+            v_receiptnumber = CASE WHEN $3 = 'Paid' THEN COALESCE(v_receiptnumber, $8) ELSE v_receiptnumber END,
+            v_paidat = CASE WHEN $3 = 'Paid' THEN COALESCE(v_paidat, NOW()) ELSE v_paidat END,
+            v_rawpayload = COALESCE($9, v_rawpayload),
+            v_amount = CASE WHEN $10::numeric IS NOT NULL AND $3 = 'Paid' THEN $10 ELSE v_amount END,
+            v_updatedat = NOW()
+      WHERE ($1::text IS NOT NULL AND v_referencenumber = $1)
+         OR ($2::text IS NOT NULL AND v_paymongo_checkoutsessionid = $2)
+      RETURNING *`,
+    [
+      paymentReference,
+      sessionId,
+      status,
+      sessionId,
+      session.payment_request_id || null,
+      session.payment_id || null,
+      session.payment_link_url || null,
+      receiptNumber(),
+      rawPayload,
+      session.amount ? toMoneyNumber(session.amount) : null,
+    ],
+  )
+  return result.rows[0] || null
+}
+
+async function refreshPaymentFromXendit(payment) {
+  if (!payment?.v_paymongo_checkoutsessionid || !xenditSecretKey) return payment
+  if (!String(payment.v_paymongo_checkoutsessionid).startsWith('ps-')) return payment
+  const session = await xenditRequest(`/sessions/${encodeURIComponent(payment.v_paymongo_checkoutsessionid)}`, {
+    method: 'GET',
+  })
+  return await updatePaymentFromXenditSession(session, session) || payment
+}
+
+async function refreshPaymentFromGateway(payment) {
+  if (String(payment?.v_paymongo_checkoutsessionid || '').startsWith('ps-')) return await refreshPaymentFromXendit(payment)
+  return await refreshPaymentFromPaymongo(payment)
+}
+
 async function loadReceipt(userId, paymentReference) {
   const payment = await pool.query(
     `SELECT pt.*, q.v_referencenumber AS quotation_reference, q.v_projectname, q.v_establishmentname,
@@ -2567,7 +2867,7 @@ async function handleGetReceipt(req, res, userId, paymentReference) {
   if (!payment.rowCount) return sendJson(res, 404, { error: 'Payment transaction not found.' })
 
   if (payment.rows[0].v_status !== 'Paid') {
-    await refreshPaymentFromPaymongo(payment.rows[0])
+    await refreshPaymentFromGateway(payment.rows[0])
   }
 
   const receipt = await loadReceipt(userId, paymentReference)
@@ -2586,6 +2886,22 @@ async function handlePaymongoWebhook(req, res) {
   const eventType = webhookEventType(payload)
   if (eventType === 'checkout_session.payment.paid' || eventType === 'payment.paid') {
     await updatePaymentFromCheckout(checkoutFromWebhook(payload), payload)
+  }
+
+  return sendJson(res, 200, { ok: true })
+}
+
+async function handleXenditWebhook(req, res) {
+  if (!pool) return sendJson(res, 503, { error: 'Database is not connected.' })
+
+  const rawBody = await readRawBody(req, 256_000)
+  const token = req.headers['x-callback-token']
+  if (!verifyXenditWebhookToken(token)) return sendJson(res, 401, { error: 'Invalid Xendit webhook token.' })
+
+  const payload = rawBody.length ? JSON.parse(rawBody.toString('utf8')) : {}
+  const eventType = String(payload?.event || '').toLowerCase()
+  if (eventType.startsWith('payment_session.')) {
+    await updatePaymentFromXenditSession(xenditSessionFromPayload(payload), payload)
   }
 
   return sendJson(res, 200, { ok: true })
@@ -3674,6 +3990,8 @@ async function handleDeleteServiceAdmin(req, res, serviceId) {
 function friendlyDatabaseError(error) {
   if (error.message === 'PAYMONGO_NOT_CONFIGURED') return 'PayMongo is not configured yet. Set PAYMONGO_SECRET_KEY in .env.'
   if (error.message === 'PAYMONGO_API_ERROR') return error.publicMessage || 'PayMongo rejected the payment request.'
+  if (error.message === 'XENDIT_NOT_CONFIGURED') return 'Xendit is not configured yet. Set XENDIT_SECRET_KEY in .env.'
+  if (error.message === 'XENDIT_API_ERROR') return error.publicMessage || 'Xendit rejected the payment request.'
   if (error.message === 'AUTH_SCHEMA_INCOMPATIBLE') return 'Account access is not fully configured yet. Please contact the site administrator.'
   if (error.message === 'AUTH_SCHEMA_REQUIRED_FIELDS') return 'Account creation needs additional server-side configuration. Please contact the site administrator.'
   if (error.message === 'EMAIL_ALREADY_REGISTERED') return 'An account already exists for that email address.'
@@ -3730,6 +4048,7 @@ const server = http.createServer(async (req, res) => {
   const quotationConfirmMatch = url.pathname.match(/^\/api\/quotations\/([^/]+)\/confirm$/)
   const quotationMockPaymentMatch = url.pathname.match(/^\/api\/quotations\/([^/]+)\/mock-payment$/)
   const quotationCheckoutMatch = url.pathname.match(/^\/api\/quotations\/([^/]+)\/paymongo-checkout$/)
+  const quotationXenditCheckoutMatch = url.pathname.match(/^\/api\/quotations\/([^/]+)\/xendit-checkout$/)
   const serviceRequestMatch = url.pathname.match(/^\/api\/service-requests\/([^/]+)$/)
   const serviceRequestConfirmMatch = url.pathname.match(/^\/api\/service-requests\/([^/]+)\/confirm$/)
   const serviceRequestMockPaymentMatch = url.pathname.match(/^\/api\/service-requests\/([^/]+)\/mock-payment$/)
@@ -3748,6 +4067,7 @@ const server = http.createServer(async (req, res) => {
         supabaseAuthConfigured: Boolean(supabaseAuth),
         mysqlConfigured: Boolean(useMysql),
         paymongoConfigured: Boolean(paymongoSecretKey),
+        xenditConfigured: Boolean(xenditSecretKey),
         message: pool && (authMode === 'local' || supabaseAuth)
           ? `API, database, and ${authMode === 'local' ? 'local XAMPP auth' : 'Supabase Auth'} are configured.`
           : 'Configuration is incomplete. Check your database and auth environment variables.',
@@ -3756,6 +4076,9 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'POST' && url.pathname === '/api/paymongo/webhook') {
       return await handlePaymongoWebhook(req, res)
+    }
+    if (req.method === 'POST' && url.pathname === '/api/xendit/webhook') {
+      return await handleXenditWebhook(req, res)
     }
 
     if (url.pathname.startsWith('/api/')) {
@@ -3833,6 +4156,7 @@ const server = http.createServer(async (req, res) => {
       if (quotationConfirmMatch && req.method === 'POST') return await handleConfirmQuotation(req, res, userId, decodeURIComponent(quotationConfirmMatch[1]))
       if (quotationMockPaymentMatch && req.method === 'POST') return await handleMockQuotationPayment(req, res, userId, decodeURIComponent(quotationMockPaymentMatch[1]))
       if (quotationCheckoutMatch && req.method === 'POST') return await handleCreatePaymongoCheckout(req, res, userId, decodeURIComponent(quotationCheckoutMatch[1]))
+      if (quotationXenditCheckoutMatch && req.method === 'POST') return await handleCreateXenditCheckout(req, res, userId, decodeURIComponent(quotationXenditCheckoutMatch[1]))
       if (quotationMatch && req.method === 'GET') return await handleGetQuotation(req, res, userId, decodeURIComponent(quotationMatch[1]))
       if (quotationMatch && req.method === 'PATCH') return await handleUpdateQuotation(req, res, userId, decodeURIComponent(quotationMatch[1]))
       if (quotationMatch && req.method === 'DELETE') return await handleCancelQuotation(req, res, userId, decodeURIComponent(quotationMatch[1]))

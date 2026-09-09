@@ -109,12 +109,17 @@ export default function Profile() {
   }
 
   async function payQuotation(item) {
-    setStatus({ type: 'loading', message: 'Confirming payment...' })
+    const isServiceItem = item.kind === 'Service'
+    setStatus({ type: 'loading', message: isServiceItem ? 'Confirming payment...' : 'Opening Xendit checkout...' })
     try {
-      const isServiceItem = item.kind === 'Service'
-      const data = isServiceItem
-        ? await schemaApi.createServiceMockPayment(item.referenceNumber)
-        : await schemaApi.createMockPayment(item.referenceNumber)
+      if (!isServiceItem) {
+        const data = await schemaApi.createXenditCheckout(item.referenceNumber)
+        if (!data.checkoutUrl) throw new Error('Xendit did not return a checkout link.')
+        window.location.assign(data.checkoutUrl)
+        return
+      }
+
+      const data = await schemaApi.createServiceMockPayment(item.referenceNumber)
       const paid = withWorkflow((isServiceItem ? data.serviceRequest : data.quotation) || { ...item, status: 'Paid', payment: data.payment })
       const receiptData = data.receipt ? receiptFromApi(data.receipt, paid) : buildReceipt({ ...paid, id: paid.referenceNumber, customer: user?.name || paid.customerName || 'Customer' }, data.payment || {})
       updateItemInInbox({ ...paid, receipt: receiptData })
@@ -475,9 +480,13 @@ function PaymentDialog({ item, onPay, onClose }) {
             <div><span>{scheduleLabel(item)}</span><strong>{formatSchedule(item.schedule?.date || item.preferredDate, item.schedule?.time || item.preferredTime)}</strong></div>
             <div><span>Assigned staff</span><strong>{assignedStaff(item) || 'To be assigned'}</strong></div>
           </div>
-          <div className="form-status loading">This is a mock payment confirmation. No real payment gateway will be charged.</div>
+          <div className="form-status loading">
+            {item.kind === 'Service'
+              ? 'This is a mock payment confirmation. No real payment gateway will be charged.'
+              : 'You will be sent to Xendit Test Mode checkout. No live transaction will be charged.'}
+          </div>
           <div className="form-actions">
-            <button className="btn primary" type="button" onClick={() => onPay(item)}>Confirm payment</button>
+            <button className="btn primary" type="button" onClick={() => onPay(item)}>{item.kind === 'Service' ? 'Confirm payment' : 'Pay with Xendit'}</button>
             <button className="btn secondary" type="button" onClick={onClose}>Cancel</button>
           </div>
         </div>

@@ -509,6 +509,12 @@ export const schemaApi = {
     })
   },
 
+  createXenditCheckout(referenceNumber) {
+    return request(`/api/quotations/${encodeURIComponent(referenceNumber)}/xendit-checkout`, {
+      method: 'POST',
+    })
+  },
+
   confirmQuotation(referenceNumber) {
     return request(`/api/quotations/${encodeURIComponent(referenceNumber)}/confirm`, {
       method: 'POST',
