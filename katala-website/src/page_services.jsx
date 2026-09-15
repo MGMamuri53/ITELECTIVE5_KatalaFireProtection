@@ -133,8 +133,10 @@ export default function Services() {
     const pendingTitle = sessionStorage.getItem('katala-pending-service')
     if (!pendingTitle) return
     const pending = serviceItems.find((item) => item.title === pendingTitle)
-    sessionStorage.removeItem('katala-pending-service')
-    if (pending) setSelectedService(pending)
+    if (pending) {
+      sessionStorage.removeItem('katala-pending-service')
+      setSelectedService(pending)
+    }
   }, [serviceItems, signedIn])
 
   useEffect(() => {

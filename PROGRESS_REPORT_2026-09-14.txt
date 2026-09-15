@@ -1,0 +1,191 @@
+PROGRESS REPORT
+KATALA - Fire Protection & Life Safety Website
+Date: September 14, 2026
+Project: ITELECTIVE5_KatalaFireProtection
+
+====================================================================
+1. SESSION OVERVIEW
+====================================================================
+This session focused on three goals:
+  a) Full project audit (standing up the stack and validating health)
+  b) Finding and fixing real bugs across the customer, staff, admin, and
+     API-server layers
+  c) Investigating the payment (Xendit) checkout flow after a customer
+     reported a stuck GCash payment button
+
+====================================================================
+2. PROJECT STRUCTURE & BASELINE
+====================================================================
+- backend/ ................ Stock Laravel 13 scaffold (no app logic yet)
+- katala-website/ ......... Active application
+    - React 19 + Vite 8 frontend (src/page_*.jsx, src/Admin/, src/Staff/)
+    - Node ESM API server (src/server.js, ~4,216 lines)
+    - MySQL database "db_katala" via XAMPP (localhost:3306)
+    - Local auth provider (AUTH_PROVIDER=local)
+    - Xendit configured in test mode (xenditConfigured: true)
+
+Baseline validations run:
+  - npm run lint ........... PASS  (3 pre-existing warnings, 0 errors)
+  - npm run build .......... PASS
+  - node --check src/server.js  PASS (syntax OK)
+  - GET /api/health ........ OK (database configured, local MySQL auth up)
+
+====================================================================
+3. LIVE API TESTING AGAINST MySQL
+====================================================================
+Endpoints exercised end-to-end against the local database:
+  - auth:    signup, session, profile update, sign-in
+  - catalog: materials list, services list
+  - customer: create/get/update/cancel quotation, customer inbox
+  - service requests: create, read, staff status update, re-schedule
+  - admin:   signup as admin, dashboard, accounts, materials, services
+  - staff:   work queue (quotations + services), members list
+
+Findings during testing:
+  - A stale background Node process was previously bound to port 3001,
+    causing confusing 403 responses during testing. It was terminated;
+    port 3001 is now confirmed free. (Infrastructure note, not a code bug.)
+  - All test accounts and test transactions created during QA were
+    removed from the database afterward.
+
+====================================================================
+4. BUGS FIXED (8 total)
+====================================================================
+
+4.1  Staff work queue had no quotation description
+     File: katala-website/src/server.js (handleStaffWorkQueue)
+     The work-queue quotation mapping never returned v_projectdescription,
+     so the Admin quotation detail always showed
+     "No description provided."
+     Fix: added projectDescription: row.v_projectdescription to the
+     staff work-queue quotation payload. Verified live.
+
+4.2  Staff Messages page ignored the search filter
+     File: katala-website/src/Staff/pages/MessagesPage.jsx
+     The thread list rendered threads.map(...) instead of shown.map(...),
+     so the search box filtered nothing and clicking could select an
+     undefined thread.
+     Fix: iterated the filtered "shown" array.
+
+4.3  Service calendar kept stale schedule drafts
+     File: katala-website/src/Staff/pages/ServiceCalendarPage.jsx
+     CalendarRow initialised its draft state once from the item and
+     never reset it, so editing then moving between rows left old
+     date/time/staff values in the inputs.
+     Fix: added a useEffect that re-syncs draft when the item changes.
+
+4.4  Staff service status saves could 400 or wipe the schedule
+     Files: katala-website/src/Staff/pages/WorkQueuePage.jsx and
+            katala-website/src/server.js
+     Two related problems:
+       - The queue always re-sent the stored preferred date/time, which the
+         server rejects if the date is in the past (status-only saves -> 400).
+       - The server unconditionally wrote v_preferreddate / v_preferredtime,
+         so a status-only update could null out a previously scheduled visit.
+     Fix: the queue now only sends schedule values when a new schedule is
+     provided, and the server only writes the schedule columns when a
+     date/time is present.
+     Verified live: status-only update preserves schedule; a real
+     reschedule still applies.
+
+4.5  Customer "Edit quote" button showed but the server refused
+     File: katala-website/src/page_profile.jsx
+     The button appeared when status was "Under Review", but the server
+     only permits editing quotations still in "Submitted".
+     Fix: gate changed to item.status === 'Submitted'.
+
+4.6  Products page: editing an "Under Review" quote always errored (409)
+     File: katala-website/src/page_products.jsx
+     The manage-order modal treated "Under Review" as editable, but the
+     API rejects edits after the quote leaves "Submitted".
+     Fix: editable narrowed to ['Submitted'].
+
+4.7  Products page: mojibake close icon on the receipt modal
+     File: katala-website/src/page_products.jsx
+     The close glyph was the corrupted string "Ã—".
+     Fix: replaced with the correct multiplication sign "×".
+
+4.8  Services page: pending-service auto-open never triggered for DB services
+     File: katala-website/src/page_services.jsx
+     The pending-service key was removed from sessionStorage before the
+     database catalog loaded, so the modal never opened for DB-only
+     services.
+     Fix: the key is only removed when a matching service is actually found.
+
+Verification after fixes:
+  - npm run lint ........... PASS (0 errors)
+  - npm run build .......... PASS
+  - node --check src/server.js  PASS
+  - Focused API tests confirmed fixes 4.1 and 4.4 end-to-end.
+
+====================================================================
+5. PAYMENT (XENDIT) CHECKOUT FLOW - INVESTIGATION
+====================================================================
+Question under review: after staff sets the price and the customer pays,
+will the Xendit checkout actually appear?
+
+Findings:
+  - Product quotations pay through Xendit's hosted checkout.
+    Flow: staff sets price -> status becomes payable (e.g. Customer
+    Confirmed) -> customer clicks "Proceed to payment" ->
+    POST /api/quotations/{ref}/xendit-checkout -> server creates a
+    Xendit Payment Session -> redirect to payment_link_url (hosted page).
+  - Service requests do NOT use Xendit; they use a mock payment path.
+
+Issue reported by the customer:
+  - On Xendit's staging checkout page (checkout-staging.xendit.co), the
+    GCash button showed a stuck loading spinner.
+  - Browser console showed ERR_BLOCKED_BY_CLIENT for Cloudflare Insights
+    (beacon.min.js), Datadog RUM, and Google Play logging endpoints, plus
+    a Datadog "3KiB" warning.
+
+Investigation conclusion:
+  - These console errors are from Xendit's OWN hosted page, NOT Katala.
+    A full repository grep found zero references to those scripts/domains,
+    and the stack trace (Loading.tsx) belongs to Xendit's Next.js app.
+  - They are telemetry/monitoring scripts being blocked by the browser's
+    Brave Shields ad blocker (orange lion icon). They do not run the
+    payment flow and are not the cause of the stuck button.
+  - Katala's integration was checked and is correct: Xendit session is
+    created with a proper channel array (allowed_payment_channels is
+    already parsed at server.js:28-31), payment_link_url is returned, and
+    the customer reaches the hosted page.
+  - The stuck GCash spinner is an Xendit-side (sandbox/dashboard
+    configuration) issue, outside Katala's codebase.
+
+Recommended next steps (outside this report's code changes):
+  - Test with Brave Shields disabled for checkout-staging.xendit.co.
+  - Verify the Xendit test-dashboard has the GCash e-wallet channel
+    enabled for this merchant account / sandbox.
+  - For production, ensure the Xendit webhook URL (POST /api/xendit/webhook)
+    is publicly reachable over HTTPS, and that XENDIT_WEBHOOK_TOKEN in
+    .env matches the token configured in the Xendit dashboard.
+  - success/cancel return URLs are only sent when APP_ORIGIN uses HTTPS
+    (server.js:2318-2319), which is correct per Xendit's HTTPS requirement.
+
+====================================================================
+6. SUMMARY OF FILE CHANGES
+====================================================================
+Changed this session:
+  - katala-website/src/server.js                      (fixes 4.1, 4.4)
+  - katala-website/src/Staff/pages/MessagesPage.jsx   (fix 4.2)
+  - katala-website/src/Staff/pages/ServiceCalendarPage.jsx (fix 4.3)
+  - katala-website/src/Staff/pages/WorkQueuePage.jsx  (fix 4.4)
+  - katala-website/src/page_profile.jsx               (fix 4.5)
+  - katala-website/src/page_products.jsx              (fixes 4.6, 4.7)
+  - katala-website/src/page_services.jsx              (fix 4.8)
+
+Note: The working tree already contained the in-progress Supabase ->
+local MySQL migration (deleted PostgreSQL backup files, updated
+package.json, etc.). Those were present before this session and were
+left undisturbed.
+
+====================================================================
+7. OUTSTANDING / NEXT ACTIONS
+====================================================================
+  - Confirm the Xendit dashboard GCash channel configuration for the test
+    merchant account.
+  - Optional: improve customer-facing error feedback in the payQuotation
+    flow so a failed checkout session shows a clear message instead of a
+    hanging spinner.
+  - Optional: commit the eight fixes above once the user approves.

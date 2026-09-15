@@ -15,8 +15,10 @@ body,
 }
 
 /* Each routed page returns a fragment, so its direct children share this
-   viewport-filling grid and the footer remains at the bottom. */
-#root {
+   viewport-filling grid and the footer remains at the bottom.
+   Auth pages (.auth-page) are standalone full-page elements — exclude them
+   from the grid so they fill the viewport naturally without empty rows. */
+#root:not(:has(> .auth-page)) {
   display: grid;
   grid-template-rows: auto 1fr auto;
 }

@@ -84,9 +84,8 @@ export default function App() {
 
       if (!isAuthReady() && protectedRoutes.has(route)) return
 
-      // Supabase's email-confirmation link can establish the verified session
-      // when the customer returns to the site. Move verified customers out of
-      // the registration/sign-in screen once that session is available.
+      // Move signed-in users out of the registration/sign-in screen once a
+      // local portal session is available.
       if (session?.token && (route === 'signup' || route === 'signin')) {
         if (route === 'signin' && sessionStorage.getItem('katala-login-in-progress')) return
         const savedReturnPage = sessionStorage.getItem('katala-return-after-auth') || defaultRouteForRole(role)
@@ -116,13 +115,13 @@ export default function App() {
       }
     }
 
-    addEventListener('hashchange', syncRoute)
-    addEventListener('katala-auth-changed', syncAuth)
+    window.addEventListener('hashchange', syncRoute)
+    window.addEventListener('katala-auth-changed', syncAuth)
     syncAuth()
 
     return () => {
-      removeEventListener('hashchange', syncRoute)
-      removeEventListener('katala-auth-changed', syncAuth)
+      window.removeEventListener('hashchange', syncRoute)
+      window.removeEventListener('katala-auth-changed', syncAuth)
     }
   }, [])
 

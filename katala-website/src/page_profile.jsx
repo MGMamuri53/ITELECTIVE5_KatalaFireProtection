@@ -305,7 +305,7 @@ function CustomerActions({ item, isService = false, onView, onEdit, onConfirm, o
   return (
     <div className="profile-action-row">
       <button className="btn secondary profile-action" type="button" onClick={() => onView(item)}>View details</button>
-      {!isService && item.status === 'Under Review' && (
+      {!isService && item.status === 'Submitted' && (
         <button className="btn secondary profile-action" type="button" onClick={() => onEdit(item)}>Edit quote</button>
       )}
       {item.status === 'Ready for Payment' && (

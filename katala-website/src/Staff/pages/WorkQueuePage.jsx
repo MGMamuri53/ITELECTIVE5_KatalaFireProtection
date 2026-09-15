@@ -392,8 +392,10 @@ function backendStatusPatch(item, patch) {
       payload.quotationTotal = quotation.total;
       payload.charges = quotation.charges || [];
     }
-    payload.preferredDate = patch.schedule?.date || item.schedule?.date || item.preferredDate || '';
-    payload.preferredTime = patch.schedule?.time || item.schedule?.time || item.preferredTime || '';
+    if (patch.schedule?.date || patch.schedule?.time) {
+      payload.preferredDate = patch.schedule.date || '';
+      payload.preferredTime = patch.schedule.time || '';
+    }
     payload.recurrenceFrequency = patch.recurrenceFrequency || item.recurrenceFrequency || 'One-time';
   }
   return payload;

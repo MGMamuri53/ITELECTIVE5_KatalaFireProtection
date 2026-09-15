@@ -20,7 +20,7 @@ function defaultPageForRole(role) {
 function canAccessReturnPage(page, role) {
   if (page === 'admin') return role === 'admin'
   if (staffRoutes.has(page)) return role === 'staff' || role === 'admin'
-  if (page === 'profile') return role === 'customer'
+  if (page === 'profile') return true // any authenticated role can view their profile
   return true
 }
 
@@ -66,7 +66,7 @@ export default function Signin() {
       } else if (/invalid login credentials|invalid credentials/i.test(raw)) {
         message = 'Incorrect email address or password.'
       } else if (error instanceof TypeError) {
-        message = 'Unable to connect to Supabase Auth. Please check your internet connection and try again.'
+        message = 'Unable to connect to the local API. Please check that the API server and database are running.'
       }
       setStatus({ type: 'error', message })
     }

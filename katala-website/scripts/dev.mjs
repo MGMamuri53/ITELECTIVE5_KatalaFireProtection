@@ -70,7 +70,8 @@ process.on('SIGTERM', () => shutdown(0))
 
 console.log('Starting Katala development environment...')
 if (await isPortInUse(Number(process.env.PORT || 3001))) {
-  console.log('Port 3001 is already in use; reusing the running API server.')
+  console.error('Port 3001 is already in use. Stop the existing API/dev server, then run this command again so the latest backend code is loaded.')
+  shutdown(1)
 } else {
   start('api')
 }

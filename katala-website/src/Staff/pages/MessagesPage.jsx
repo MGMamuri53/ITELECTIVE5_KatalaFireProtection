@@ -24,7 +24,7 @@ function MessagesPage() {
       />
       <div className="grid grid-cols-1 lg:grid-cols-[420px_1fr] gap-6">
         <section className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
-          {threads.map((thread) => (
+          {shown.map((thread) => (
             <button key={thread.id} onClick={() => setSelected(thread)} className={`w-full p-5 text-left border-b border-slate-100 hover:bg-slate-50 transition-colors ${selectedThread?.id === thread.id ? 'bg-red-50/50' : 'bg-white'}`}>
               <div className="flex justify-between gap-4 mb-1">
                 <h2 className="text-sm font-bold text-slate-900">{thread.customer}</h2>

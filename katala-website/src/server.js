@@ -2,15 +2,10 @@ import 'dotenv/config'
 import http from 'node:http'
 import { createHmac, randomBytes, randomUUID, scrypt as scryptCallback, timingSafeEqual } from 'node:crypto'
 import { promisify } from 'node:util'
-import pg from 'pg'
 import mysql from 'mysql2/promise'
-import { createClient } from '@supabase/supabase-js'
 
-const { Pool } = pg
 const scrypt = promisify(scryptCallback)
 const port = Number(process.env.PORT || 3001)
-const databaseUrl = (process.env.DATABASE_URL || '').trim()
-const useSsl = String(process.env.DATABASE_SSL || '').toLowerCase() === 'true'
 const mysqlConfig = {
   host: (process.env.DB_HOST || '').trim(),
   port: Number(process.env.DB_PORT || 3306),
@@ -20,9 +15,6 @@ const mysqlConfig = {
   timezone: (process.env.DB_TIMEZONE || '+08:00').trim(),
 }
 const useMysql = Boolean(mysqlConfig.host && mysqlConfig.database && mysqlConfig.user)
-const supabaseUrl = (process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || '').trim()
-const supabasePublishableKey = (process.env.SUPABASE_PUBLISHABLE_KEY || process.env.VITE_SUPABASE_PUBLISHABLE_KEY || '').trim()
-const authMode = (process.env.AUTH_PROVIDER || (useMysql ? 'local' : 'supabase')).trim().toLowerCase()
 const appOrigin = (process.env.APP_ORIGIN || '').trim().replace(/\/$/, '')
 const paymongoSecretKey = (process.env.PAYMONGO_SECRET_KEY || '').trim()
 const paymongoWebhookSecret = (process.env.PAYMONGO_WEBHOOK_SECRET || '').trim()
@@ -64,14 +56,24 @@ function mysqlPlaceholders(sql, params = []) {
   return { sql: nextSql, params: nextParams }
 }
 
+function normalizeMysqlRow(row) {
+  if (!row || typeof row !== 'object') return row
+  return Object.fromEntries(
+    Object.entries(row).map(([key, value]) => [key.toLowerCase(), value]),
+  )
+}
+
 function mysqlResult(rows, info = {}) {
+  const normalizedRows = Array.isArray(rows) ? rows.map(normalizeMysqlRow) : []
   return {
-    rows: Array.isArray(rows) ? rows : [],
-    rowCount: Array.isArray(rows) ? rows.length : Number(info.affectedRows || 0),
+    rows: normalizedRows,
+    rowCount: normalizedRows.length || Number(info.affectedRows || 0),
+    insertId: info.insertId || null,
   }
 }
 
 function mysqlInsertUuid(sql) {
+  if (!useMysql) return sql
   const match = sql.match(/^(\s*INSERT\s+INTO\s+(?:public\.)?)(\w+)(\s*\()([^)]*)(\)\s*)(VALUES|SELECT)\b/i)
   if (!match) return sql
   const idColumn = tableIdColumn(match[2])
@@ -86,10 +88,14 @@ function mysqlInsertUuid(sql) {
     )
   }
 
-  return sql.replace(
-    /^(\s*INSERT\s+INTO\s+(?:public\.)?\w+\s*\()([^)]*)(\)\s*SELECT\s*)/i,
-    `$1${idColumn}, $2$3UUID(), `,
-  )
+  if (match[6].toUpperCase() === 'SELECT') {
+    return sql.replace(
+      /^(\s*INSERT\s+INTO\s+(?:public\.)?\w+\s*\()([^)]*)(\)\s*SELECT\s+)/i,
+      `$1${idColumn}, $2) SELECT UUID(), `,
+    )
+  }
+
+  return sql
 }
 
 class MysqlConnection {
@@ -172,20 +178,7 @@ class MysqlPool {
   }
 }
 
-const pool = useMysql
-  ? new MysqlPool(mysqlConfig)
-  : databaseUrl
-    ? new Pool({
-        connectionString: databaseUrl,
-        ...(useSsl ? { ssl: { rejectUnauthorized: false } } : {}),
-      })
-    : null
-
-const supabaseAuth = authMode !== 'local' && supabaseUrl && supabasePublishableKey
-  ? createClient(supabaseUrl, supabasePublishableKey, {
-      auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
-    })
-  : null
+const pool = useMysql ? new MysqlPool(mysqlConfig) : null
 
 const requestLog = new Map()
 const RATE_LIMIT_WINDOW_MS = 60_000
@@ -334,39 +327,35 @@ function configuredPortalRole(email) {
   return ''
 }
 
-function authRole(user) {
-  const app = user?.app_metadata || {}
-  const meta = user?.user_metadata || {}
-
-  const role = String(
-    app.role
-      || app.user_role
-      || meta.role
-      || meta.account_type
-      || 'customer',
-  ).trim().toLowerCase()
-
-  return ['admin', 'staff', 'customer'].includes(role) ? role : 'customer'
-}
-
 async function databaseRole(userId, client = pool) {
-  if (!client || !isUuid(userId)) return ''
-  const result = await client.query(
-    `SELECT r.v_rolename
-       FROM public.tbl_userrole ur
-       JOIN public.tbl_role r ON r.v_roleid = ur.v_roleid
-      WHERE ur.v_userid = $1
-        AND r.v_isactive = TRUE
-      ORDER BY CASE LOWER(r.v_rolename)
-        WHEN 'admin' THEN 1
-        WHEN 'administrator' THEN 1
-        WHEN 'staff' THEN 2
-        WHEN 'customer' THEN 3
-        ELSE 4
-      END
-      LIMIT 1`,
-    [userId],
-  )
+  if (!client || !userId) return ''
+  const hasUserRole = await tableExists('tbl_userrole', client)
+  const result = hasUserRole
+    ? await client.query(
+      `SELECT r.v_rolename AS v_rolename
+         FROM public.tbl_userrole ur
+         JOIN public.tbl_role r ON r.v_roleid = ur.v_roleid
+        WHERE ur.v_userid = $1
+          AND r.v_isactive = TRUE
+        ORDER BY CASE LOWER(r.v_rolename)
+          WHEN 'admin' THEN 1
+          WHEN 'administrator' THEN 1
+          WHEN 'staff' THEN 2
+          WHEN 'customer' THEN 3
+          ELSE 4
+        END
+        LIMIT 1`,
+      [userId],
+    )
+    : await client.query(
+      `SELECT r.v_rolename AS v_rolename
+         FROM public.tbl_user u
+         JOIN public.tbl_role r ON r.v_roleid = u.v_roleid
+        WHERE u.v_userid = $1
+          AND r.v_isactive = TRUE
+        LIMIT 1`,
+      [userId],
+    )
 
   const role = String(result.rows[0]?.v_rolename || '').trim().toLowerCase()
   if (role === 'administrator') return 'admin'
@@ -395,43 +384,25 @@ function normalizeAccountStatus(status, fallback = 'Active') {
 }
 
 async function userAccountRecord(userId, client = pool) {
-  if (!client || !isUuid(userId)) return null
+  if (!client || !userId) return null
+  const columns = await tableColumns('tbl_user', client)
   const result = await client.query(
-    `SELECT v_userid, v_firstname, v_lastname, v_emailaddress, v_contactnumber,
-            v_accountstatus, v_companyname, v_jobtitle, v_industry, v_companyaddress
+    `SELECT v_userid AS v_userid,
+            v_firstname AS v_firstname,
+            v_lastname AS v_lastname,
+            v_emailaddress AS v_emailaddress,
+            ${optionalSelect(columns, ['v_contactnumber', 'v_mobilenumber'], 'v_contactnumber')},
+            v_accountstatus,
+            ${optionalSelect(columns, ['v_companyname'], 'v_companyname')},
+            ${optionalSelect(columns, ['v_jobtitle'], 'v_jobtitle')},
+            ${optionalSelect(columns, ['v_industry'], 'v_industry')},
+            ${optionalSelect(columns, ['v_companyaddress'], 'v_companyaddress')}
        FROM public.tbl_user
       WHERE v_userid = $1
       LIMIT 1`,
     [userId],
   )
   return result.rows[0] || null
-}
-
-function authUserNames(user) {
-  const meta = user?.user_metadata || {}
-  const firstName = clean(meta.first_name || meta.firstName || meta.given_name, 120)
-  const lastName = clean(meta.last_name || meta.lastName || meta.family_name, 120)
-  if (firstName || lastName) {
-    return {
-      firstName: firstName || 'Katala',
-      lastName: lastName || 'Customer',
-    }
-  }
-
-  const fullName = clean(meta.full_name || meta.name, 240)
-  const parts = fullName.split(/\s+/).filter(Boolean)
-  if (parts.length > 1) {
-    return {
-      firstName: parts.slice(0, -1).join(' ').slice(0, 120),
-      lastName: parts.at(-1).slice(0, 120),
-    }
-  }
-
-  const emailName = String(user?.email || 'customer').split('@')[0].replace(/[._-]+/g, ' ').trim()
-  return {
-    firstName: clean(parts[0] || emailName || 'Katala', 120),
-    lastName: 'Customer',
-  }
 }
 
 function signLocalToken(user) {
@@ -505,19 +476,44 @@ function localSessionResponse(user, token) {
 }
 
 async function localAuthUserByEmail(email, client = pool) {
-  const result = await client.query(
-    `SELECT la.v_userid, la.v_passwordhash,
-            u.v_firstname, u.v_lastname, u.v_emailaddress, u.v_contactnumber,
-            u.v_accountstatus, u.v_companyname,
-            r.v_rolename AS role_name
-       FROM local_auth_accounts la
-       JOIN tbl_user u ON u.v_userid = la.v_userid
-       LEFT JOIN tbl_userrole ur ON ur.v_userid = u.v_userid
-       LEFT JOIN tbl_role r ON r.v_roleid = ur.v_roleid
-      WHERE LOWER(u.v_emailaddress) = LOWER($1)
-      LIMIT 1`,
-    [email],
-  )
+  const userColumns = await tableColumns('tbl_user', client)
+  const hasLocalAuthAccounts = await tableExists('local_auth_accounts', client)
+  const hasUserRole = await tableExists('tbl_userrole', client)
+  const result = hasLocalAuthAccounts
+    ? await client.query(
+      `SELECT la.v_userid AS v_userid,
+              la.v_passwordhash AS v_passwordhash,
+              u.v_firstname AS v_firstname,
+              u.v_lastname AS v_lastname,
+              u.v_emailaddress AS v_emailaddress,
+              ${optionalSelect(userColumns, ['v_contactnumber', 'v_mobilenumber'], 'v_contactnumber')},
+              u.v_accountstatus AS v_accountstatus,
+              ${optionalSelect(userColumns, ['v_companyname'], 'v_companyname')},
+              r.v_rolename AS role_name
+         FROM local_auth_accounts la
+         JOIN tbl_user u ON u.v_userid = la.v_userid
+         ${hasUserRole ? 'LEFT JOIN tbl_userrole ur ON ur.v_userid = u.v_userid LEFT JOIN tbl_role r ON r.v_roleid = ur.v_roleid' : 'LEFT JOIN tbl_role r ON r.v_roleid = u.v_roleid'}
+        WHERE LOWER(u.v_emailaddress) = LOWER($1)
+        LIMIT 1`,
+      [email],
+    )
+    : await client.query(
+      `SELECT u.v_userid AS v_userid,
+              u.v_passwordhash AS v_passwordhash,
+              u.v_firstname AS v_firstname,
+              u.v_lastname AS v_lastname,
+              u.v_emailaddress AS v_emailaddress,
+              ${optionalSelect(userColumns, ['v_contactnumber', 'v_mobilenumber'], 'v_contactnumber')},
+              u.v_accountstatus AS v_accountstatus,
+              ${optionalSelect(userColumns, ['v_companyname'], 'v_companyname')},
+              r.v_rolename AS role_name
+         FROM tbl_user u
+         LEFT JOIN tbl_role r ON r.v_roleid = u.v_roleid
+        WHERE LOWER(u.v_emailaddress) = LOWER($1)
+           OR LOWER(u.v_username) = LOWER($1)
+        LIMIT 1`,
+      [email],
+    )
   const row = result.rows[0]
   if (!row) return null
   return {
@@ -534,13 +530,19 @@ async function localAuthUserByEmail(email, client = pool) {
 }
 
 async function localAuthUserById(userId, client = pool) {
+  const userColumns = await tableColumns('tbl_user', client)
+  const hasUserRole = await tableExists('tbl_userrole', client)
   const result = await client.query(
-    `SELECT u.v_userid, u.v_firstname, u.v_lastname, u.v_emailaddress, u.v_contactnumber,
-            u.v_accountstatus, u.v_companyname,
+    `SELECT u.v_userid AS v_userid,
+            u.v_firstname AS v_firstname,
+            u.v_lastname AS v_lastname,
+            u.v_emailaddress AS v_emailaddress,
+            ${optionalSelect(userColumns, ['v_contactnumber', 'v_mobilenumber'], 'v_contactnumber')},
+            u.v_accountstatus AS v_accountstatus,
+            ${optionalSelect(userColumns, ['v_companyname'], 'v_companyname')},
             r.v_rolename AS role_name
        FROM tbl_user u
-       LEFT JOIN tbl_userrole ur ON ur.v_userid = u.v_userid
-       LEFT JOIN tbl_role r ON r.v_roleid = ur.v_roleid
+       ${hasUserRole ? 'LEFT JOIN tbl_userrole ur ON ur.v_userid = u.v_userid LEFT JOIN tbl_role r ON r.v_roleid = ur.v_roleid' : 'LEFT JOIN tbl_role r ON r.v_roleid = u.v_roleid'}
       WHERE u.v_userid = $1
       LIMIT 1`,
     [userId],
@@ -560,7 +562,6 @@ async function localAuthUserById(userId, client = pool) {
 }
 
 async function handleLocalSignup(req, res) {
-  if (authMode !== 'local') return sendJson(res, 404, { error: 'Local auth is not enabled.' })
   const body = await readBody(req)
   const email = clean(body.email, 180).toLowerCase()
   const password = String(body.password || '')
@@ -574,35 +575,44 @@ async function handleLocalSignup(req, res) {
   }
   if (password.length < 6) return sendJson(res, 400, { error: 'Password must be at least 6 characters.' })
 
-  const userId = randomUUID()
   const passwordHash = await hashPassword(password)
   const result = await transaction(async (client) => {
+    const userColumns = await tableColumns('tbl_user', client)
+    const hasLocalAuthAccounts = await tableExists('local_auth_accounts', client)
+    const hasUserRole = await tableExists('tbl_userrole', client)
     const existing = await localAuthUserByEmail(email, client)
     if (existing) return { exists: true }
-    await client.query(
-      `INSERT INTO tbl_user
-        (v_userid, v_firstname, v_lastname, v_emailaddress, v_contactnumber,
-         v_accountstatus, v_companyname, v_jobtitle, v_industry, v_companyaddress)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-      [
-        userId,
-        firstName,
-        lastName,
-        email,
-        nullable(body.contactNumber, 40),
-        status,
-        nullable(body.companyName, 160),
-        nullable(body.jobTitle, 120),
-        nullable(body.industry, 120),
-        nullable(body.companyAddress, 500),
-      ],
-    )
-    await client.query(
-      'INSERT INTO local_auth_accounts (v_userid, v_emailaddress, v_passwordhash) VALUES ($1, $2, $3)',
-      [userId, email, passwordHash],
-    )
-    await assignSingleRole(client, userId, accountType)
-    return await localAuthUserById(userId, client)
+    const roleId = await ensureRole(client, accountType)
+    const newUserId = randomUUID()
+    const userValues = {
+      ...(hasLocalAuthAccounts ? { v_userid: newUserId } : {}),
+      ...(userColumns.has('v_roleid') && !hasUserRole ? { v_roleid: roleId } : {}),
+      ...(userColumns.has('v_username') ? { v_username: email } : {}),
+      ...(userColumns.has('v_passwordhash') ? { v_passwordhash: passwordHash } : {}),
+      v_firstname: firstName,
+      v_lastname: lastName,
+      v_emailaddress: email,
+      ...(userColumns.has('v_contactnumber') ? { v_contactnumber: nullable(body.contactNumber, 40) } : {}),
+      ...(userColumns.has('v_mobilenumber') ? { v_mobilenumber: nullable(body.contactNumber, 40) } : {}),
+      v_accountstatus: status,
+      ...(userColumns.has('v_companyname') ? { v_companyname: nullable(body.companyName, 160) } : {}),
+      ...(userColumns.has('v_jobtitle') ? { v_jobtitle: nullable(body.jobTitle, 120) } : {}),
+      ...(userColumns.has('v_industry') ? { v_industry: nullable(body.industry, 120) } : {}),
+      ...(userColumns.has('v_companyaddress') ? { v_companyaddress: nullable(body.companyAddress, 500) } : {}),
+    }
+    const insertUser = buildInsert('tbl_user', userValues)
+    await client.query(insertUser.sql, insertUser.params)
+
+    if (hasLocalAuthAccounts) {
+      await client.query(
+        'INSERT INTO local_auth_accounts (v_userid, v_emailaddress, v_passwordhash) VALUES ($1, $2, $3)',
+        [newUserId, email, passwordHash],
+      )
+    }
+    if (hasUserRole) await assignSingleRole(client, newUserId, accountType)
+    const createdUser = await localAuthUserByEmail(email, client)
+    if (!createdUser) throw new Error('USER_CREATE_FAILED')
+    return createdUser
   })
 
   if (result.exists) return sendJson(res, 409, { error: 'An account already exists for this email.' })
@@ -616,7 +626,6 @@ async function handleLocalSignup(req, res) {
 }
 
 async function handleLocalSignin(req, res) {
-  if (authMode !== 'local') return sendJson(res, 404, { error: 'Local auth is not enabled.' })
   const body = await readBody(req)
   const email = clean(body.email, 180).toLowerCase()
   const password = String(body.password || '')
@@ -628,68 +637,21 @@ async function handleLocalSignin(req, res) {
   return sendJson(res, 200, localSessionResponse(user, token))
 }
 
-async function ensureAuthUserProfile(client, user) {
-  if (!client || !isUuid(user?.id)) return null
-  const existing = await userAccountRecord(user.id, client)
-  const configuredRole = configuredPortalRole(user.email)
-  const currentRole = existing ? await databaseRole(user.id, client) : ''
-  const role = configuredRole || currentRole || authRole(user)
-  const status = configuredRole ? 'Active' : normalizeAccountStatus(existing?.v_accountstatus)
-
-  if (!existing) {
-    const names = authUserNames(user)
-    await client.query(
-      `INSERT INTO public.tbl_user
-        (v_userid, v_firstname, v_lastname, v_emailaddress, v_accountstatus)
-       VALUES ($1, $2, $3, $4, $5)
-       ON CONFLICT (v_userid) DO NOTHING`,
-      [user.id, names.firstName, names.lastName, String(user.email || '').toLowerCase(), status],
-    )
-  } else if (configuredRole && normalizeAccountStatus(existing.v_accountstatus) !== 'Active') {
-    await client.query(
-      'UPDATE public.tbl_user SET v_accountstatus = $2, v_updatedat = now() WHERE v_userid = $1',
-      [user.id, 'Active'],
-    )
-  }
-
-  if (configuredRole || !currentRole) await assignSingleRole(client, user.id, role)
-  return await userAccountRecord(user.id, client)
-}
-
 async function getAuthenticatedUser(req) {
   const token = getBearerToken(req)
-  if (authMode === 'local') {
-    const localToken = verifyLocalToken(token)
-    if (localToken?.sub) {
-      const user = await localAuthUserById(localToken.sub).catch(() => null)
-      if (user) {
-        const configuredRole = configuredPortalRole(user.email)
-        return {
-          id: user.id,
-          email: user.email,
-          name: [user.firstName, user.lastName].filter(Boolean).join(' '),
-          accountStatus: configuredRole ? 'Active' : user.accountStatus,
-          companyName: user.companyName || null,
-          contactNumber: user.contactNumber || null,
-          role: configuredRole || user.role,
-        }
-      }
-    }
-  }
-
-  if (token && supabaseAuth) {
-    const { data, error } = await supabaseAuth.auth.getUser(token)
-    if (!error && data?.user?.id) {
-      const account = await ensureAuthUserProfile(pool, data.user)
-      const configuredRole = configuredPortalRole(data.user.email)
+  const localToken = verifyLocalToken(token)
+  if (localToken?.sub) {
+    const user = await localAuthUserById(localToken.sub).catch(() => null)
+    if (user) {
+      const configuredRole = configuredPortalRole(user.email)
       return {
-        id: data.user.id,
-        email: data.user.email || '',
-        name: account ? [account.v_firstname, account.v_lastname].filter(Boolean).join(' ') : '',
-        accountStatus: configuredRole ? 'Active' : normalizeAccountStatus(account?.v_accountstatus),
-        companyName: account?.v_companyname || null,
-        contactNumber: account?.v_contactnumber || null,
-        role: configuredRole || await databaseRole(data.user.id) || authRole(data.user),
+        id: user.id,
+        email: user.email,
+        name: [user.firstName, user.lastName].filter(Boolean).join(' '),
+        accountStatus: configuredRole ? 'Active' : user.accountStatus,
+        companyName: user.companyName || null,
+        contactNumber: user.contactNumber || null,
+        role: configuredRole || user.role,
       }
     }
   }
@@ -863,6 +825,10 @@ async function assignSingleRole(client, userId, role) {
   const normalized = normalizePortalRole(role) || 'customer'
   const roleId = await ensureRole(client, normalized)
   if (!roleId) throw new Error('ROLE_NOT_FOUND')
+  if (!await tableExists('tbl_userrole', client)) {
+    await client.query('UPDATE public.tbl_user SET v_roleid = $2 WHERE v_userid = $1', [userId, roleId])
+    return
+  }
   await client.query('DELETE FROM public.tbl_userrole WHERE v_userid = $1', [userId])
   if (useMysql) {
     await client.query(
@@ -1252,7 +1218,7 @@ async function tableColumns(tableName, client = pool) {
         AND table_name = $1`,
     [tableName, useMysql ? mysqlConfig.database : 'public'],
   )
-  const columns = new Set(result.rows.map((row) => row.column_name))
+  const columns = new Set(result.rows.map((row) => String(row.column_name || '').toLowerCase()))
   columnCache.set(tableName, columns)
   return columns
 }
@@ -1294,7 +1260,7 @@ function tableIdColumn(table) {
 
 function buildInsert(table, values) {
   const nextValues = { ...values }
-  const idColumn = useMysql ? tableIdColumn(table) : ''
+  const idColumn = tableIdColumn(table)
   if (idColumn && nextValues[idColumn] === undefined) nextValues[idColumn] = randomUUID()
   const entries = Object.entries(nextValues).filter(([, value]) => value !== undefined)
   const columns = entries.map(([key]) => key)
@@ -1327,6 +1293,9 @@ function materialStatus(row) {
 
 async function listMaterials(client = pool) {
   const productColumns = await tableColumns('tbl_product', client)
+  const hasProductVariants = await tableExists('tbl_productvariant', client)
+  if (!hasProductVariants) return await listLegacyProducts(client, productColumns)
+
   const variantColumns = await tableColumns('tbl_productvariant', client)
   const categoryTableExists = await tableExists('tbl_productcategory', client)
   const categoryExpr = categoryTableExists
@@ -1385,6 +1354,53 @@ async function listMaterials(client = pool) {
     maxPrice: row.max_price === null || row.max_price === undefined ? null : Number(row.max_price),
     active: Boolean(row.is_active),
     status: materialStatus(row),
+  }))
+}
+
+async function listLegacyProducts(client = pool, productColumns = null) {
+  const columns = productColumns || await tableColumns('tbl_product', client)
+  const hasInventory = await tableExists('tbl_inventory', client)
+  const inventoryColumns = hasInventory ? await tableColumns('tbl_inventory', client) : new Set()
+  const stockColumn = firstColumn(inventoryColumns, ['v_quantityavailable', 'v_quantityonhand'])
+  const reorderColumn = firstColumn(inventoryColumns, ['v_reorderlevel'])
+  const priceColumn = firstColumn(columns, ['v_currentprice', 'v_price'])
+
+  const result = await client.query(
+    `SELECT p.v_productId,
+            p.v_productCode,
+            p.v_productName,
+            ${optionalSelect(columns, ['v_productcategory', 'v_category'], 'category')},
+            ${optionalSelect(columns, ['v_model', 'v_productmodel'], 'model')},
+            ${optionalSelect(columns, ['v_unitofmeasure', 'v_productunit'], 'unit')},
+            ${optionalSelect(columns, ['v_productdescription', 'v_description'], 'description')},
+            ${optionalSelect(columns, ['v_productimageurl', 'v_imageurl', 'v_image_url'], 'image_url')},
+            p.v_isActive AS is_active,
+            ${priceColumn ? `p.${priceColumn}` : 'NULL'} AS current_price,
+            ${hasInventory && stockColumn ? `i.${stockColumn}` : 'NULL'} AS stock_quantity,
+            ${hasInventory && reorderColumn ? `i.${reorderColumn}` : 'NULL'} AS reorder_level
+       FROM public.tbl_product p
+       ${hasInventory ? 'LEFT JOIN public.tbl_inventory i ON i.v_productId = p.v_productId' : ''}
+      ORDER BY p.v_productName, p.v_model`,
+  )
+
+  return result.rows.map((row) => ({
+    productId: String(row.v_productid || row.v_productId || ''),
+    variantId: String(row.v_productid || row.v_productId || ''),
+    sku: row.v_productcode || row.v_productCode || '',
+    name: row.v_productname || row.v_productName || '',
+    category: row.category || 'Uncategorized',
+    model: row.model || '',
+    size: '',
+    unit: row.unit || '',
+    description: row.description || '',
+    imageUrl: row.image_url || '',
+    stock: row.stock_quantity === null || row.stock_quantity === undefined ? null : Number(row.stock_quantity),
+    reorderLevel: row.reorder_level === null || row.reorder_level === undefined ? null : Number(row.reorder_level),
+    minPrice: row.current_price === null || row.current_price === undefined ? null : Number(row.current_price),
+    maxPrice: row.current_price === null || row.current_price === undefined ? null : Number(row.current_price),
+    active: Boolean(row.is_active),
+    status: materialStatus(row),
+    legacyCatalog: true,
   }))
 }
 
@@ -2285,16 +2301,19 @@ async function handleCreateXenditCheckout(req, res, userId, referenceNumber) {
     if (activePayment.rowCount && activePayment.rows[0].v_checkouturl) return { existing: activePayment.rows[0] }
 
     const paymentReference = transactionReference(referenceNumber)
-    const inserted = await client.query(
+    await client.query(
       `INSERT INTO public.tbl_paymenttransaction
         (v_quotationid, v_userid, v_referencenumber, v_status, v_amount, v_currency, v_paymentmethod)
        SELECT v_quotationid, v_userid, $3, 'Pending', $4, 'PHP', 'Xendit Payment Link'
          FROM public.tbl_quotation
         WHERE v_userid = $1
-          AND v_referencenumber = $2
-       RETURNING *`,
+          AND v_referencenumber = $2`,
       [userId, referenceNumber, paymentReference, quotation.totalAmount],
     )
+    const insertedRecord = (await client.query(
+      `SELECT * FROM public.tbl_paymenttransaction WHERE v_referencenumber = $1 LIMIT 1`,
+      [paymentReference],
+    )).rows[0]
 
     const base = publicAppBase(req, { preferConfiguredHttps: true })
     const hasHttpsReturn = /^https:\/\//i.test(base)
@@ -2319,7 +2338,7 @@ async function handleCreateXenditCheckout(req, res, userId, referenceNumber) {
         currency: 'PHP',
         country: 'PH',
         customer: {
-          reference_id: xenditReference(userId, 'CUSTOMER'),
+          reference_id: xenditReference(`${userId}-${quotation.referenceNumber}`, 'CUSTOMER'),
           type: 'INDIVIDUAL',
           email: customer.v_emailaddress || undefined,
           mobile_number: xenditPhone(customer.v_contactnumber),
@@ -2355,7 +2374,7 @@ async function handleCreateXenditCheckout(req, res, userId, referenceNumber) {
         WHERE v_paymenttransactionid = $1
        RETURNING *`,
       [
-        inserted.rows[0].v_paymenttransactionid,
+        insertedRecord.v_paymenttransactionid,
         xendit.payment_session_id || null,
         xendit.payment_request_id || null,
         xendit.payment_id || null,
@@ -3447,6 +3466,7 @@ async function handleStaffWorkQueue(req, res) {
         preferredTime: timeOnly(row.v_scheduledtime),
         staff: row.v_assignedstaff,
         projectAddress: row.v_projectaddress,
+        projectDescription: row.v_projectdescription,
         customerRemarks: row.v_customerremarks,
         additionalCost: totals.additionalCost,
         totalAmount: totals.totalAmount,
@@ -3744,8 +3764,7 @@ async function handleStaffUpdateServiceRequest(req, res, staffUser, referenceNum
       : undefined
     const update = buildUpdate('tbl_servicerequest', 'v_referencenumber', referenceNumber, {
       v_requeststatus: status,
-      v_preferreddate: preferredDate,
-      v_preferredtime: preferredTime,
+      ...(preferredDate || preferredTime ? { v_preferreddate: preferredDate, v_preferredtime: preferredTime } : {}),
       v_customerremarks: nextRemarks,
       ...(status.toLowerCase() === 'completed' && columns.has('v_completedat') ? { v_completedat: new Date() } : {}),
       ...(columns.has('v_quotedamount') && quotedAmount > 0 ? { v_quotedamount: quotedAmount } : {}),
@@ -4018,15 +4037,19 @@ async function reportDatabaseReadiness() {
 
   try {
     await pool.query('SELECT 1')
+    const hasProductVariants = await tableExists('tbl_productvariant')
+    const productCountSql = hasProductVariants
+      ? '(SELECT COUNT(*)::int FROM public.tbl_productvariant WHERE v_isactive = TRUE)'
+      : '(SELECT COUNT(*)::int FROM public.tbl_product WHERE v_isActive = TRUE)'
     const result = await pool.query(`
       SELECT
-        (SELECT COUNT(*)::int FROM public.tbl_productvariant WHERE v_isactive = TRUE) AS product_variants,
-        (SELECT COUNT(*)::int FROM public.tbl_service WHERE v_isactive = TRUE) AS services
+        ${productCountSql} AS product_variants,
+        (SELECT COUNT(*)::int FROM public.tbl_service WHERE v_isActive = TRUE) AS services
     `)
 
     const counts = result.rows[0] || {}
     console.log('Database connection: verified')
-    console.log(`Catalog readiness: ${counts.product_variants || 0} active product variant(s), ${counts.services || 0} active service(s)`)
+    console.log(`Catalog readiness: ${counts.product_variants || 0} active product record(s), ${counts.services || 0} active service(s)`)
 
     if (!counts.product_variants || !counts.services) {
       console.warn('Catalog/service data is incomplete. Import database/katala_xampp_mysql_schema.sql in phpMyAdmin before testing quotation/service submissions.')
@@ -4063,13 +4086,12 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, {
         ok: true,
         databaseConfigured: Boolean(pool),
-        authProvider: authMode === 'local' ? 'local' : 'supabase',
-        supabaseAuthConfigured: Boolean(supabaseAuth),
+        authProvider: 'local',
         mysqlConfigured: Boolean(useMysql),
         paymongoConfigured: Boolean(paymongoSecretKey),
         xenditConfigured: Boolean(xenditSecretKey),
-        message: pool && (authMode === 'local' || supabaseAuth)
-          ? `API, database, and ${authMode === 'local' ? 'local XAMPP auth' : 'Supabase Auth'} are configured.`
+        message: pool
+          ? 'API, database, and local MySQL auth are configured.'
           : 'Configuration is incomplete. Check your database and auth environment variables.',
       })
     }
@@ -4189,6 +4211,6 @@ const server = http.createServer(async (req, res) => {
 server.listen(port, () => {
   console.log(`Katala API running on http://localhost:${port}`)
   console.log(pool ? 'Database connection: configured' : 'Database connection: not configured')
-  console.log(authMode === 'local' ? 'Auth provider: local XAMPP/MySQL' : (supabaseAuth ? 'Supabase Auth verification: configured' : 'Supabase Auth verification: not configured'))
+  console.log('Auth provider: local MySQL')
   void reportDatabaseReadiness()
 })

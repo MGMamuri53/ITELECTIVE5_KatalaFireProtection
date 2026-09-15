@@ -27,7 +27,7 @@ If you are developing a production application, we recommend using TypeScript wi
 
 ## PayMongo Checkout
 
-Run `database/paymongo_transactions.sql` once in Supabase before accepting payments.
+Import the MySQL payment transaction table/migration in phpMyAdmin before accepting payments.
 
 Required server environment variables:
 
@@ -68,7 +68,7 @@ Local `http://localhost` can create test sessions, but Xendit return URLs must b
 
 ## Staff and Administrator Access
 
-The sign-in page supports Customer, Staff, and Administrator portals. Staff/admin accounts must have a Supabase Auth role in `app_metadata.role` or `user_metadata.role` set to `staff` or `admin`.
+The sign-in page supports Customer, Staff, and Administrator portals. Staff/admin accounts use the role assigned in the local MySQL `tbl_user` / `tbl_role` tables.
 
 For local/testing overrides, set comma-separated email allowlists in the API environment:
 

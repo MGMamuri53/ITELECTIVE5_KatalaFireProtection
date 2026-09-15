@@ -1,11 +1,7 @@
-import { isSupabaseConfigured, supabase } from './supabaseClient'
-
 const demoUserId = (import.meta.env.VITE_DEMO_USER_ID || '').trim()
-const useLocalAuth = ((import.meta.env.VITE_AUTH_PROVIDER || '').trim().toLowerCase() === 'local') || !isSupabaseConfigured
 const AUTH_KEY = 'katala-auth-v2'
 let currentSessionSnapshot = null
 let authReady = false
-let portalSessionCache = { token: '', expiresAt: 0, user: null, promise: null }
 
 function sameUser(a, b) {
   return JSON.stringify(a || null) === JSON.stringify(b || null)
@@ -116,37 +112,13 @@ function saveSession(session) {
 
   // Keep only the minimum UI snapshot in memory. Do not persist the JWT.
   currentSessionSnapshot = nextSnapshot
-  if (useLocalAuth) {
-    try {
-      localStorage.setItem(AUTH_KEY, JSON.stringify(nextSnapshot))
-    } catch {
-      // Ignore storage restrictions.
-    }
+  try {
+    localStorage.setItem(AUTH_KEY, JSON.stringify(nextSnapshot))
+  } catch {
+    // Ignore storage restrictions.
   }
 
   if (changed) emitAuthChanged()
-}
-
-async function syncSession(session, options = {}) {
-  if (!session?.access_token) {
-    clearStoredSession()
-    if (options.markReady) markAuthReady()
-    return
-  }
-
-  saveSession(session)
-  try {
-    const portalUser = await loadPortalSession(session)
-    patchSessionUser({
-      ...(portalUser || {}),
-      role: portalUser?.role || currentSessionSnapshot?.user?.role || 'customer',
-    })
-  } catch (error) {
-    if (error?.status === 401 || error?.status === 403) clearStoredSession()
-    throw error
-  } finally {
-    if (options.markReady) markAuthReady()
-  }
 }
 
 function patchSessionUser(patch) {
@@ -164,47 +136,9 @@ function patchSessionUser(patch) {
   return currentSessionSnapshot.user
 }
 
-async function loadPortalSession(session) {
-  const token = session?.access_token || ''
-  if (!token) return null
-
-  if (portalSessionCache.token === token && portalSessionCache.user && Date.now() < portalSessionCache.expiresAt) {
-    return portalSessionCache.user
-  }
-  if (portalSessionCache.token === token && portalSessionCache.promise) {
-    return await portalSessionCache.promise
-  }
-
-  portalSessionCache = {
-    token,
-    expiresAt: 0,
-    user: null,
-    promise: fetch('/api/auth/portal-session', {
-      headers: {
-        Authorization: `Bearer ${token}`,
-      },
-    }).then(async (response) => {
-      const data = await response.json().catch(() => ({}))
-      if (!response.ok) {
-        const error = new Error(data.error || `Request failed (${response.status}).`)
-        error.status = response.status
-        throw error
-      }
-      portalSessionCache.user = data.user || null
-      portalSessionCache.expiresAt = Date.now() + 5_000
-      return portalSessionCache.user
-    }).finally(() => {
-      portalSessionCache.promise = null
-    }),
-  }
-
-  return await portalSessionCache.promise
-}
-
 export function clearStoredSession() {
   const hadSession = Boolean(currentSessionSnapshot)
   currentSessionSnapshot = null
-  portalSessionCache = { token: '', expiresAt: 0, user: null, promise: null }
 
   // Clean up snapshots that may have been created by an older build.
   try {
@@ -217,48 +151,24 @@ export function clearStoredSession() {
   if (hadSession) emitAuthChanged()
 }
 
-if (useLocalAuth) {
-  try {
-    const stored = JSON.parse(localStorage.getItem(AUTH_KEY) || 'null')
-    if (stored?.token && (!stored.expiresAt || Date.now() < Number(stored.expiresAt) * 1000)) {
-      currentSessionSnapshot = stored
-    } else {
-      localStorage.removeItem(AUTH_KEY)
-    }
-  } catch {
+try {
+  const stored = JSON.parse(localStorage.getItem(AUTH_KEY) || 'null')
+  if (stored?.token && (!stored.expiresAt || Date.now() < Number(stored.expiresAt) * 1000)) {
+    currentSessionSnapshot = stored
+  } else {
     localStorage.removeItem(AUTH_KEY)
   }
-  markAuthReady()
-} else {
-  // Align the synchronous UI snapshot with the current in-memory Supabase session.
-  supabase.auth.getSession().then(({ data }) => {
-    return syncSession(data?.session, { markReady: true })
-  }).catch(() => {
-    clearStoredSession()
-    markAuthReady()
-  })
-
-  supabase.auth.onAuthStateChange((_event, session) => {
-    syncSession(session).catch(() => {})
-  })
+} catch {
+  localStorage.removeItem(AUTH_KEY)
 }
+markAuthReady()
 
 async function request(path, options = {}) {
   const headers = new Headers(options.headers || {})
   if (options.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json')
 
-  if (useLocalAuth && currentSessionSnapshot?.token) {
+  if (currentSessionSnapshot?.token) {
     headers.set('Authorization', `Bearer ${currentSessionSnapshot.token}`)
-  } else if (!useLocalAuth) {
-    // Always ask Supabase for the latest access token so refreshed JWTs are sent to the API.
-    const { data: { session } = {} } = await supabase.auth.getSession()
-    if (session?.access_token) {
-      saveSession(session)
-      headers.set('Authorization', `Bearer ${session.access_token}`)
-    } else if (demoUserId) {
-      // Optional local-development fallback only.
-      headers.set('X-Development-User-Id', demoUserId)
-    }
   } else if (demoUserId) {
     headers.set('X-Development-User-Id', demoUserId)
   }
@@ -275,114 +185,29 @@ async function request(path, options = {}) {
 
 export const authApi = {
   async signup(payload) {
-    if (useLocalAuth) {
-      const data = await request('/api/auth/signup', {
-        method: 'POST',
-        body: JSON.stringify(payload),
-      })
-      if (data.session) saveSession(data.session)
-      if (data.user) patchSessionUser(data.user)
-      return data
-    }
-
-    const accountType = ['staff', 'customer'].includes(String(payload.accountType || '').toLowerCase())
-      ? String(payload.accountType).toLowerCase()
-      : 'customer'
-    const redirectUrl = `${window.location.origin}${window.location.pathname}`
-    const { data, error } = await supabase.auth.signUp({
-      email: payload.email,
-      password: payload.password,
-      options: {
-        emailRedirectTo: redirectUrl,
-        data: {
-          account_type: accountType,
-          role: accountType,
-          first_name: payload.firstName,
-          last_name: payload.lastName,
-          contact_number: payload.contactNumber,
-          company_name: payload.companyName,
-          job_title: payload.jobTitle,
-          industry: payload.industry,
-          company_address: payload.companyAddress,
-        },
-      },
+    const data = await request('/api/auth/signup', {
+      method: 'POST',
+      body: JSON.stringify(payload),
     })
-
-    if (error) throw error
-    if (data.user?.id) {
-      await request('/api/auth/register-profile', {
-        method: 'POST',
-        body: JSON.stringify({
-          userId: data.user.id,
-          accountType,
-          firstName: payload.firstName,
-          lastName: payload.lastName,
-          email: payload.email,
-          contactNumber: payload.contactNumber,
-          companyName: payload.companyName,
-          jobTitle: payload.jobTitle,
-          industry: payload.industry,
-          companyAddress: payload.companyAddress,
-        }),
-      })
-    }
-    return {
-      ok: true,
-      user: data.user,
-      accountType,
-      requiresApproval: accountType === 'staff',
-      requiresEmailConfirmation: !data.session,
-    }
+    if (data.session) saveSession(data.session)
+    if (data.user) patchSessionUser(data.user)
+    return data
   },
 
   async signin({ email, password, portal = 'customer' }) {
-    if (useLocalAuth) {
-      const data = await request('/api/auth/signin', {
-        method: 'POST',
-        body: JSON.stringify({ email, password, portal }),
-      })
-      if (!data.session) throw new Error('Unable to create a signed-in session.')
-      saveSession(data.session)
-      const user = patchSessionUser(data.user || sessionUser(data.session)) || sessionUser(data.session)
-      const requestedPortal = String(portal || 'customer').toLowerCase()
-      const role = user?.role || 'customer'
-      const allowed = requestedPortal === 'customer'
-        ? role === 'customer'
-        : role === requestedPortal || (requestedPortal === 'staff' && role === 'admin')
-      if (!allowed) {
-        clearStoredSession()
-        const portalLabel = role === 'admin' ? 'Administrator' : role.charAt(0).toUpperCase() + role.slice(1)
-        throw new Error(`This account is registered as ${portalLabel}. Choose the matching portal in "Sign in as".`)
-      }
-      return { ok: true, user, session: data.session }
-    }
-
-    const { data, error } = await supabase.auth.signInWithPassword({ email, password })
-    if (error) throw error
+    const data = await request('/api/auth/signin', {
+      method: 'POST',
+      body: JSON.stringify({ email, password, portal }),
+    })
     if (!data.session) throw new Error('Unable to create a signed-in session.')
-
     saveSession(data.session)
-    const baseUser = sessionUser(data.session)
-    let portalUser = null
-    try {
-      portalUser = await loadPortalSession(data.session)
-    } catch (error) {
-      await supabase.auth.signOut().catch(() => {})
-      clearStoredSession()
-      throw error
-    }
-    const user = patchSessionUser({
-      ...(portalUser || {}),
-      role: portalUser?.role || baseUser?.role || 'customer',
-    }) || baseUser
-
+    const user = patchSessionUser(data.user || sessionUser(data.session)) || sessionUser(data.session)
     const requestedPortal = String(portal || 'customer').toLowerCase()
     const role = user?.role || 'customer'
     const allowed = requestedPortal === 'customer'
       ? role === 'customer'
       : role === requestedPortal || (requestedPortal === 'staff' && role === 'admin')
     if (!allowed) {
-      await supabase.auth.signOut().catch(() => {})
       clearStoredSession()
       const portalLabel = role === 'admin' ? 'Administrator' : role.charAt(0).toUpperCase() + role.slice(1)
       throw new Error(`This account is registered as ${portalLabel}. Choose the matching portal in "Sign in as".`)
@@ -391,17 +216,8 @@ export const authApi = {
   },
 
   async signout() {
-    if (useLocalAuth) {
-      clearStoredSession()
-      return { ok: true }
-    }
-
-    try {
-      const { error } = await supabase.auth.signOut()
-      if (error) throw error
-    } finally {
-      clearStoredSession()
-    }
+    clearStoredSession()
+    return { ok: true }
   },
 
   async updateProfile(payload) {
@@ -414,55 +230,22 @@ export const authApi = {
   },
 
   async updatePassword(password) {
-    if (useLocalAuth) {
-      throw new Error('Password updates are not available for local XAMPP auth yet.')
-    }
-
-    const { error } = await supabase.auth.updateUser({ password })
-    if (error) throw error
-    return { ok: true }
+    void password
+    throw new Error('Password updates are not available for local MySQL auth yet.')
   },
 
   async session() {
-    if (useLocalAuth) {
-      return {
-        ok: true,
-        user: getStoredSession()?.user || null,
-        session: currentSessionSnapshot
-          ? { access_token: currentSessionSnapshot.token, expires_at: currentSessionSnapshot.expiresAt, user: currentSessionSnapshot.user }
-          : null,
-      }
+    return {
+      ok: true,
+      user: getStoredSession()?.user || null,
+      session: currentSessionSnapshot
+        ? { access_token: currentSessionSnapshot.token, expires_at: currentSessionSnapshot.expiresAt, user: currentSessionSnapshot.user }
+        : null,
     }
-
-    const { data, error } = await supabase.auth.getSession()
-    if (error) throw error
-    if (!data.session) {
-      clearStoredSession()
-      return { ok: true, user: null, session: null }
-    }
-    saveSession(data.session)
-    const baseUser = sessionUser(data.session)
-    const portalUser = await loadPortalSession(data.session)
-    const user = patchSessionUser({
-      ...(portalUser || {}),
-      role: portalUser?.role || baseUser?.role || 'customer',
-    }) || baseUser
-    return { ok: true, user, session: data.session }
   },
 
   async resendVerification(email) {
-    if (useLocalAuth) {
-      return { ok: true, email }
-    }
-
-    const redirectUrl = `${window.location.origin}${window.location.pathname}`
-    const { error } = await supabase.auth.resend({
-      type: 'signup',
-      email,
-      options: { emailRedirectTo: redirectUrl },
-    })
-    if (error) throw error
-    return { ok: true }
+    return { ok: true, email }
   },
 }
 
@@ -658,17 +441,8 @@ export const schemaApi = {
 
   async downloadAdminDatabaseBackup() {
     const headers = new Headers()
-    if (useLocalAuth && currentSessionSnapshot?.token) {
+    if (currentSessionSnapshot?.token) {
       headers.set('Authorization', `Bearer ${currentSessionSnapshot.token}`)
-    } else if (!useLocalAuth) {
-      const { data: { session } = {} } = await supabase.auth.getSession()
-      if (session?.access_token) {
-        saveSession(session)
-        headers.set('Authorization', `Bearer ${session.access_token}`)
-      } else if (demoUserId) {
-        headers.set('X-Development-User-Id', demoUserId)
-        headers.set('X-Development-Role', 'admin')
-      }
     } else if (demoUserId) {
       headers.set('X-Development-User-Id', demoUserId)
       headers.set('X-Development-Role', 'admin')

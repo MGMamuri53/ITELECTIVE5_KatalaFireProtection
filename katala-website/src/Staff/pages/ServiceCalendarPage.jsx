@@ -170,6 +170,14 @@ function CalendarRow({ item, staffMembers, onUpdate, focused = false }) {
     staff: item.schedule?.staff || '',
   });
 
+  useEffect(() => {
+    setDraft({
+      date: item.schedule?.date || item.preferredDate || '',
+      time: item.schedule?.time || item.preferredTime || '',
+      staff: item.schedule?.staff || '',
+    });
+  }, [item]);
+
   return (
     <div id={rowId(item.id)} className={`scroll-mt-24 grid grid-cols-1 md:grid-cols-[minmax(230px,1.15fr)_1.1fr_1.35fr_1fr_auto] gap-3 md:gap-4 px-5 md:px-6 py-5 items-start md:items-center hover:bg-slate-50/50 ${focused ? 'bg-red-50 ring-1 ring-[#b3000c]/20' : ''}`}>
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-2 min-w-0">

@@ -102,7 +102,7 @@ function AccountMenu({ className = '', session, onSignOut, onNavigate }) {
       >
         <span className="account-avatar" aria-hidden="true">{accountName.charAt(0).toUpperCase()}</span>
         <span className="account-trigger-label">{accountName}</span>
-        <span className="account-caret" aria-hidden="true">v</span>
+        <span className="account-caret" aria-hidden="true">▾</span>
       </button>
       <div className={`account-dropdown ${open ? 'open' : ''}`} role="menu">
         <a href="#profile" role="menuitem" onClick={navigate}>Profile</a>
@@ -115,6 +115,18 @@ function AccountMenu({ className = '', session, onSignOut, onNavigate }) {
 }
 
 export function Footer() {
+  const [session, setSession] = useState(() => getStoredSession())
+
+  useEffect(() => {
+    const sync = () => setSession(getStoredSession())
+    window.addEventListener('katala-auth-changed', sync)
+    window.addEventListener('storage', sync)
+    return () => {
+      window.removeEventListener('katala-auth-changed', sync)
+      window.removeEventListener('storage', sync)
+    }
+  }, [])
+
   return (
     <footer className="site-footer">
       <div className="shell footer-grid">
@@ -126,16 +138,16 @@ export function Footer() {
         <div>
           <h4>Quick Links</h4>
           <a href="#home">Home</a>
-          <a href="#home">About</a>
+          <a href="#company">About</a>
           <a href="#products">Products / Services</a>
-          <a href="#signin">Client Portal</a>
+          <a href={session?.token ? '#profile' : '#signin'}>{session?.token ? 'Profile' : 'Client Portal'}</a>
         </div>
         <div>
           <h4>Contact Information</h4>
           <span>Greenbreeze Village 1, Langkaan</span>
-          <span>Dasmarinas City, Cavite</span>
-          <a href="mailto:pfkatala@gmail.com">pfkatala@gmail.com</a>
-          <a href="tel:0462304234">Tel: 0462304234</a>
+          <span>Dasmariñas City, Cavite</span>
+          <a href={`mailto:${company.email}`}>{company.email}</a>
+          <a href={`tel:${company.phone.replace(/[^\d+]/g, '')}`}>Tel: {company.phone}</a>
           <a href="tel:09606819547">Mobile: 09606819547</a>
         </div>
       </div>

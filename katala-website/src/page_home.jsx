@@ -1,5 +1,7 @@
+import { useEffect, useState } from 'react'
 import { Nav, Footer } from './components'
-import { serviceLines } from './data/company'
+import { company, serviceLines } from './data/company'
+import { getStoredSession } from './services/katalaApi'
 import hero from './assets/pictures/download.jpg'
 import project from './assets/pictures/8e738016-5df0-4c6b-b121-d8d3c90a4a67.jpg'
 import shield from './assets/icons/shield.png'
@@ -9,6 +11,17 @@ import setting from './assets/icons/setting.png'
 const portalFeatures = ['Submit quotation requests', 'Request fire protection services', 'Keep project and request details organized', 'Access your customer account']
 
 export default function Home() {
+  const [session, setSession] = useState(() => getStoredSession())
+
+  useEffect(() => {
+    const sync = () => setSession(getStoredSession())
+    window.addEventListener('katala-auth-changed', sync)
+    window.addEventListener('storage', sync)
+    return () => {
+      window.removeEventListener('katala-auth-changed', sync)
+      window.removeEventListener('storage', sync)
+    }
+  }, [])
   return (
     <div className="landing-page">
       <Nav />
@@ -20,8 +33,14 @@ export default function Home() {
               <h1>Fire Protection Solutions You Can Rely On</h1>
               <p>Explore dependable fire protection products and service support, then use the Katala Client Portal to submit quotations and service requests in one organized place.</p>
               <div className="hero-actions landing-actions">
-                <a className="btn primary" href="#signup">Create an Account <span aria-hidden="true">→</span></a>
-                <a className="btn secondary" href="#signin">Sign In to Client Portal</a>
+                {!session?.token ? (
+                  <>
+                    <a className="btn primary" href="#signup">Create an Account <span aria-hidden="true">→</span></a>
+                    <a className="btn secondary" href="#signin">Sign In to Client Portal</a>
+                  </>
+                ) : (
+                  <a className="btn primary" href="#products">Request a Quotation <span aria-hidden="true">→</span></a>
+                )}
               </div>
               <div className="landing-assurance"><span>Products</span><span>Service support</span><span>Customer portal</span></div>
             </div>
@@ -45,7 +64,7 @@ export default function Home() {
             <div className="landing-solution-grid">
               {serviceLines.slice(0, 6).map((item, index) => (
                 <article className="landing-solution-card" key={item.title}>
-                  <span className="solution-index">0{index + 1}</span><h3>{item.title}</h3><p>{item.copy}</p>
+                  <span className="solution-index">{String(index + 1).padStart(2, '0')}</span><h3>{item.title}</h3><p>{item.copy}</p>
                   <a href={index === 0 ? '#products' : '#services'}>Explore {index === 0 ? 'products' : 'services'} →</a>
                 </article>
               ))}
@@ -70,13 +89,13 @@ export default function Home() {
 
         <section className="section portal-section" id="portal">
           <div className="shell portal-card">
-            <div className="portal-card-copy"><span className="eyebrow">KATALA CLIENT PORTAL</span><h2>Your requests, kept in one place.</h2><p>Create a customer account to send Katala the information needed to review your quotation or service requirement.</p><div className="hero-actions"><a className="btn primary" href="#signup">Create an Account</a><a className="btn portal-secondary" href="#signin">Sign In</a></div></div>
+            <div className="portal-card-copy"><span className="eyebrow">KATALA CLIENT PORTAL</span><h2>Your requests, kept in one place.</h2><p>{!session?.token ? 'Create a customer account to send Katala the information needed to review your quotation or service requirement.' : 'Manage your quotations, service requests, and profile details all in one organized place.'}</p><div className="hero-actions">{!session?.token ? <><a className="btn primary" href="#signup">Create an Account</a><a className="btn portal-secondary" href="#signin">Sign In</a></> : <><a className="btn primary" href="#profile">Go to Profile</a><a className="btn portal-secondary" href="#products">View Catalog</a></>}</div></div>
             <ul className="portal-feature-list">{portalFeatures.map((feature) => <li key={feature}><span aria-hidden="true">✓</span>{feature}</li>)}</ul>
           </div>
         </section>
 
         <section className="landing-contact">
-          <div className="shell landing-contact-inner"><div><span className="eyebrow">TALK TO KATALA</span><h2>Need help with a fire protection requirement?</h2></div></div>
+          <div className="shell landing-contact-inner"><div><span className="eyebrow">TALK TO KATALA</span><h2>Need help with a fire protection requirement?</h2></div><div className="landing-contact-actions"><a className="landing-contact-actions" href={`mailto:${company.email}`}>{company.email}</a><a className="landing-contact-actions" href={`tel:${company.phone.replace(/[^\d+]/g, '')}`}>{company.phone}</a></div></div>
         </section>
       </main>
       <Footer />

@@ -2,17 +2,6 @@
   gap: 20px;
 }
 
-.service-card {
-  min-height: 300px;
-  padding: 40px 34px;
-  display: flex;
-  flex-direction: column;
-  background: #fff;
-  border: 1px solid var(--line);
-  border-radius: 3px;
-  box-shadow: 0 5px 14px #25313a0d;
-}
-
 .service-title {
   display: flex;
   align-items: flex-start;

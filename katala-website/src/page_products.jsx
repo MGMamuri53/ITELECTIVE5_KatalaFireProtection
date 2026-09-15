@@ -930,7 +930,7 @@ function ManageQuotationModal({ quotationRefs, setQuotationRefs, initialPaymentR
   }
 
   const displayStatus = displayQuotationStatus(quotation?.status)
-  const editable = ['Submitted', 'Under Review'].includes(quotation?.status)
+  const editable = ['Submitted'].includes(quotation?.status)
   const paid = quotation?.payment?.status === 'Paid'
 
   return (
@@ -1020,7 +1020,7 @@ function ReceiptModal({ receipt, onClose }) {
   return (
     <div className="modal-backdrop receipt-backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
       <section className="product-modal receipt-modal" role="dialog" aria-modal="true" aria-labelledby="receipt-title">
-        <button ref={closeRef} className="modal-close" type="button" onClick={onClose} aria-label="Close">Ã—</button>
+        <button ref={closeRef} className="modal-close" type="button" onClick={onClose} aria-label="Close">×</button>
         <div className="receipt-panel">
           <div className="receipt-heading">
             <div>
