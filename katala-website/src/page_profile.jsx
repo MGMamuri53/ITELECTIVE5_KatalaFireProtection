@@ -1,5 +1,8 @@
 import { useEffect, useState } from 'react'
+import { ArrowLeft, Building2, CheckCircle2, CreditCard, Download, Loader2, QrCode, Smartphone } from 'lucide-react'
 import { Footer, Nav, PageIntro } from './components'
+import { company } from './data/company'
+import { qrPhPaymentConfig } from './paymentConfig'
 import { getStoredSession, schemaApi } from './services/katalaApi'
 import { buildReceipt, getWorkflow, normalizeQuotation, subscribeWorkflowChanges } from './Staff/staffWorkflow'
 
@@ -108,29 +111,6 @@ export default function Profile() {
     }
   }
 
-  async function payQuotation(item) {
-    const isServiceItem = item.kind === 'Service'
-    setStatus({ type: 'loading', message: isServiceItem ? 'Confirming payment...' : 'Opening Xendit checkout...' })
-    try {
-      if (!isServiceItem) {
-        const data = await schemaApi.createXenditCheckout(item.referenceNumber)
-        if (!data.checkoutUrl) throw new Error('Xendit did not return a checkout link.')
-        window.location.assign(data.checkoutUrl)
-        return
-      }
-
-      const data = await schemaApi.createServiceMockPayment(item.referenceNumber)
-      const paid = withWorkflow((isServiceItem ? data.serviceRequest : data.quotation) || { ...item, status: 'Paid', payment: data.payment })
-      const receiptData = data.receipt ? receiptFromApi(data.receipt, paid) : buildReceipt({ ...paid, id: paid.referenceNumber, customer: user?.name || paid.customerName || 'Customer' }, data.payment || {})
-      updateItemInInbox({ ...paid, receipt: receiptData })
-      setReceipt(receiptData)
-      setPaymentConfirm(null)
-      setStatus({ type: 'idle', message: '' })
-    } catch (error) {
-      setStatus({ type: 'error', message: error.message || 'Unable to confirm payment.' })
-    }
-  }
-
   if (!signedIn) {
     sessionStorage.setItem('katala-return-after-auth', 'profile')
     location.hash = 'signin'
@@ -217,7 +197,7 @@ export default function Profile() {
       </main>
       {quotePreview && <QuotationDialog item={quotePreview} onClose={() => setQuotePreview(null)} />}
       {quoteEdit && <EditQuotationDialog item={quoteEdit} onSaved={updateQuotationInInbox} onClose={() => setQuoteEdit(null)} />}
-      {paymentConfirm && <PaymentDialog item={paymentConfirm} onPay={payQuotation} onClose={() => setPaymentConfirm(null)} />}
+      {paymentConfirm && <PaymentDialog item={paymentConfirm} onClose={() => setPaymentConfirm(null)} />}
       {receipt && <ReceiptDialog receipt={receipt} onClose={() => setReceipt(null)} />}
       <Footer />
     </>
@@ -458,40 +438,263 @@ function QuotationDialog({ item, onClose }) {
   )
 }
 
-function PaymentDialog({ item, onPay, onClose }) {
-  const title = quotationTitle(item)
+const paymentMethods = [
+  {
+    id: 'qrph',
+    name: 'QR PH',
+    description: 'Scan with a compatible banking or e-wallet app.',
+    icon: QrCode,
+    active: true,
+  },
+  {
+    id: 'ewallet',
+    name: 'E-wallet',
+    description: 'GCash, Maya, and other wallet channels.',
+    icon: Smartphone,
+    active: false,
+  },
+  {
+    id: 'bank',
+    name: 'Bank transfer',
+    description: 'Direct deposit or online bank transfer.',
+    icon: Building2,
+    active: false,
+  },
+  {
+    id: 'card',
+    name: 'Credit / debit card',
+    description: 'Visa, Mastercard, and card payments.',
+    icon: CreditCard,
+    active: false,
+  },
+]
+
+function PaymentDialog({ item, onClose }) {
+  const [selectedMethod, setSelectedMethod] = useState('qrph')
+  const [view, setView] = useState('methods')
+  const [qrLoadStatus, setQrLoadStatus] = useState(qrPhPaymentConfig.qrImageSrc ? 'loading' : 'missing')
+  const [paymentNotice, setPaymentNotice] = useState('')
+  const quotation = item.quotation || normalizeQuotation({}, item)
+  const total = Number(quotation.total || item.totalAmount || 0)
+  const selected = paymentMethods.find((method) => method.id === selectedMethod) || paymentMethods[0]
+  const SelectedIcon = selected.icon
+  const itemCount = quotation.charges?.length || item.items?.length || 1
+  const hasQrImage = Boolean(qrPhPaymentConfig.qrImageSrc)
+  const qrReady = hasQrImage && qrLoadStatus === 'loaded'
+
+  function selectMethod(methodId) {
+    setSelectedMethod(methodId)
+    setPaymentNotice('')
+  }
+
+  function continueToQr() {
+    if (selectedMethod !== 'qrph') return
+    setView('qr')
+    setPaymentNotice('')
+  }
+
+  function downloadQr() {
+    if (!qrReady) return
+    const link = document.createElement('a')
+    link.href = qrPhPaymentConfig.qrImageSrc
+    link.download = `katala-qrph-${item.referenceNumber}.png`
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+  }
+
+  function confirmPaid() {
+    if (!qrReady || paymentNotice) return
+    setPaymentNotice('Payment awaiting verification. Katala will confirm the payment before marking this order as paid.')
+  }
+
   return (
     <div className="modal-backdrop receipt-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
-      <section className="product-modal profile-payment-modal" role="dialog" aria-modal="true" aria-labelledby="profile-payment-title">
+      <section className="product-modal profile-payment-modal checkout-payment-modal" role="dialog" aria-modal="true" aria-labelledby="profile-payment-title">
         <button className="modal-close" type="button" onClick={onClose} aria-label="Close">x</button>
-        <div className="receipt-panel">
-          <div className="receipt-heading">
+        <div className="checkout-payment-shell">
+          <div className="checkout-payment-header">
+            <button className="checkout-back-button" type="button" onClick={view === 'qr' ? () => setView('methods') : onClose}>
+              <ArrowLeft size={17} aria-hidden="true" />
+              {view === 'qr' ? 'Payment methods' : 'Back'}
+            </button>
             <div>
-              <span className="eyebrow">PAYMENT CONFIRMATION</span>
-              <h2 id="profile-payment-title">{title}</h2>
-              <p className="muted">Quotation {item.referenceNumber}</p>
+              <strong>{company.shortName}</strong>
+              <span>Secure customer checkout</span>
             </div>
-            <strong>{formatPeso(item.quotation?.total)}</strong>
           </div>
-          <QuotationBreakdown item={item} />
-          <div className="receipt-meta">
-            <div><span>Project name</span><strong>{title}</strong></div>
-            <div><span>Establishment</span><strong>{item.establishmentName || 'Not provided'}</strong></div>
-            <div><span>{scheduleLabel(item)}</span><strong>{formatSchedule(item.schedule?.date || item.preferredDate, item.schedule?.time || item.preferredTime)}</strong></div>
-            <div><span>Assigned staff</span><strong>{assignedStaff(item) || 'To be assigned'}</strong></div>
-          </div>
-          <div className="form-status loading">
-            {item.kind === 'Service'
-              ? 'This is a mock payment confirmation. No real payment gateway will be charged.'
-              : 'You will be sent to Xendit Test Mode checkout. No live transaction will be charged.'}
-          </div>
-          <div className="form-actions">
-            <button className="btn primary" type="button" onClick={() => onPay(item)}>{item.kind === 'Service' ? 'Confirm payment' : 'Pay with Xendit'}</button>
-            <button className="btn secondary" type="button" onClick={onClose}>Cancel</button>
-          </div>
+
+          {view === 'methods' ? (
+            <>
+              <div className="checkout-payment-title">
+                <span className="eyebrow">PAYMENT</span>
+                <h2 id="profile-payment-title">Choose payment method</h2>
+                <p>Pick how you want to pay quotation {item.referenceNumber}.</p>
+              </div>
+
+              <div className="checkout-payment-grid">
+                <div className="payment-method-list" role="radiogroup" aria-label="Payment methods">
+                  {paymentMethods.map((method) => {
+                    const Icon = method.icon
+                    const checked = selectedMethod === method.id
+                    return (
+                      <button
+                        key={method.id}
+                        type="button"
+                        className={`payment-method-card ${checked ? 'selected' : ''}`}
+                        role="radio"
+                        aria-checked={checked}
+                        onClick={() => selectMethod(method.id)}
+                      >
+                        <span className="payment-method-icon"><Icon size={22} aria-hidden="true" /></span>
+                        <span>
+                          <strong>{method.name}</strong>
+                          <small>{method.description}</small>
+                        </span>
+                        <span className="payment-method-check" aria-hidden="true">{checked ? <CheckCircle2 size={20} /> : ''}</span>
+                      </button>
+                    )
+                  })}
+
+                  <div className={`payment-method-detail ${selected.active ? 'ready' : 'unavailable'}`}>
+                    <div className="payment-method-detail-heading">
+                      <SelectedIcon size={20} aria-hidden="true" />
+                      <strong>{selected.name}</strong>
+                    </div>
+                    {selected.id === 'qrph' ? (
+                      <p>QR PH is available for this checkout. Continue to view the payment instructions and QR display area.</p>
+                    ) : (
+                      <p>This payment method is not available yet. Please use QR PH.</p>
+                    )}
+                  </div>
+                </div>
+
+                <OrderSummary item={item} quotation={quotation} itemCount={itemCount} total={total} />
+              </div>
+
+              <div className="checkout-action-bar">
+                <div>
+                  <span>Amount due</span>
+                  <strong>{formatPeso(total)}</strong>
+                </div>
+                <button className="btn primary" type="button" disabled={selectedMethod !== 'qrph'} onClick={continueToQr}>
+                  {selectedMethod === 'qrph' ? 'Continue with QR PH' : 'Unavailable'}
+                </button>
+              </div>
+            </>
+          ) : (
+            <div className="qr-payment-view">
+              <div className="checkout-payment-title">
+                <span className="eyebrow">QR PH</span>
+                <h2 id="profile-payment-title">Pay with QR PH</h2>
+                <p>Use the exact amount and reference below when completing payment.</p>
+              </div>
+
+              <div className="checkout-payment-grid qr-layout">
+                <div className="qr-instructions-panel">
+                  <div className="qr-amount-card">
+                    <span>Amount to pay</span>
+                    <strong>{formatPeso(total)}</strong>
+                    <small>Order reference: {item.referenceNumber}</small>
+                  </div>
+
+                  <div className="qr-display-area">
+                    {hasQrImage ? (
+                      <>
+                        {qrLoadStatus === 'loading' && <div className="qr-placeholder"><Loader2 className="qr-spinner" size={28} aria-hidden="true" /> Loading QR image...</div>}
+                        <img
+                          src={qrPhPaymentConfig.qrImageSrc}
+                          alt="Katala QR PH payment code"
+                          className={qrLoadStatus === 'loaded' ? '' : 'qr-image-hidden'}
+                          onLoad={() => setQrLoadStatus('loaded')}
+                          onError={() => setQrLoadStatus('error')}
+                        />
+                        {qrLoadStatus === 'error' && <div className="qr-placeholder error">QR image could not be loaded. Please check the configured image path.</div>}
+                      </>
+                    ) : (
+                      <div className="qr-placeholder">
+                        <QrCode size={46} aria-hidden="true" />
+                        <strong>QR code will be provided.</strong>
+                        <span>No scannable payment QR is configured yet.</span>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="qr-action-row">
+                    <button className="btn secondary" type="button" disabled={!qrReady} onClick={downloadQr}>
+                      <Download size={17} aria-hidden="true" />
+                      Download QR
+                    </button>
+                    <button className="btn primary" type="button" disabled={!qrReady || Boolean(paymentNotice)} onClick={confirmPaid}>
+                      I have paid
+                    </button>
+                  </div>
+
+                  {!hasQrImage && <div className="form-status loading">QR PH is prepared, but payment actions are disabled until the real QR image is configured.</div>}
+                  {qrLoadStatus === 'error' && <div className="form-status error">The configured QR image is missing or invalid. Payment actions remain disabled.</div>}
+                  {paymentNotice && <div className="form-status success">{paymentNotice}</div>}
+                </div>
+
+                <aside className="qr-side-panel">
+                  <OrderSummary item={item} quotation={quotation} itemCount={itemCount} total={total} compact />
+                  <div className="qr-recipient-box">
+                    <span>Recipient</span>
+                    <strong>{qrPhPaymentConfig.recipientName || company.legalName}</strong>
+                    <small>{qrPhPaymentConfig.recipientAccount || company.email}</small>
+                  </div>
+                  <ol className="qr-instruction-list">
+                    <li>Open a compatible banking or e-wallet app.</li>
+                    <li>Scan or upload the QR PH image once Katala provides it.</li>
+                    <li>Verify the recipient and enter the exact amount shown here if required.</li>
+                    <li>Include the order reference if your app allows notes.</li>
+                    <li>Complete payment and wait for Katala verification.</li>
+                  </ol>
+                  <p className="qr-payment-note">{qrPhPaymentConfig.note}</p>
+                </aside>
+              </div>
+
+              <button className="checkout-back-link" type="button" onClick={() => setView('methods')}>
+                <ArrowLeft size={16} aria-hidden="true" />
+                Back to payment methods
+              </button>
+            </div>
+          )}
         </div>
       </section>
     </div>
+  )
+}
+
+function OrderSummary({ item, quotation, itemCount, total, compact = false }) {
+  const charges = quotation.charges || []
+  const subtotal = Number(quotation.subtotal || charges.reduce((sum, charge) => sum + Number(charge.subtotal || 0), 0) || total)
+  const discount = Number(quotation.discount || 0)
+  const shipping = Number(quotation.shipping || item.shipping || 0)
+  return (
+    <aside className={`order-summary-card ${compact ? 'compact' : ''}`}>
+      <div>
+        <span className="eyebrow">ORDER SUMMARY</span>
+        <h3>{item.referenceNumber}</h3>
+        <p>{quotationTitle(item)}</p>
+      </div>
+      <div className="order-summary-lines">
+        <div><span>Items</span><strong>{itemCount} {itemCount === 1 ? 'item' : 'items'}</strong></div>
+        {!compact && charges.slice(0, 4).map((charge) => (
+          <div key={charge.id || charge.description}>
+            <span>{charge.description || charge.type || 'Quoted item'}</span>
+            <strong>{formatPeso(charge.subtotal)}</strong>
+          </div>
+        ))}
+        {!compact && charges.length > 4 && <div><span>Additional quoted items</span><strong>{charges.length - 4}</strong></div>}
+        <div><span>Subtotal</span><strong>{formatPeso(subtotal)}</strong></div>
+        <div><span>Shipping</span><strong>{shipping > 0 ? formatPeso(shipping) : 'Included / none'}</strong></div>
+        <div><span>Discount</span><strong>{discount > 0 ? `-${formatPeso(discount)}` : 'None'}</strong></div>
+      </div>
+      <div className="order-summary-total">
+        <span>Total</span>
+        <strong>{formatPeso(total)}</strong>
+      </div>
+    </aside>
   )
 }
 
@@ -558,20 +761,6 @@ function withWorkflow(item) {
     quotation: normalizeQuotation(workflow.quotation, { ...base, ...item, totalAmount: item.totalAmount }),
     payment: item.payment || workflow.payment,
     receipt: workflow.receipt,
-  }
-}
-
-function receiptFromApi(receipt, item) {
-  return {
-    receiptNumber: receipt.receiptNumber,
-    quotationReference: receipt.quotationReference,
-    requestReference: item.referenceNumber,
-    paidAt: receipt.paidAt,
-    paidAmount: receipt.totalAmount ?? item.quotation?.total,
-    customerName: receipt.customerName || item.customerName || 'Customer',
-    serviceDetails: receipt.projectName || item.subject || 'Katala service',
-    projectAddress: receipt.projectAddress || item.projectAddress || '',
-    charges: item.quotation?.charges || [],
   }
 }
 
