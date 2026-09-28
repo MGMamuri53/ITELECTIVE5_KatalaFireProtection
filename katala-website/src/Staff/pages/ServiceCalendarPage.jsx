@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { CalendarClock, CheckCircle2, ChevronLeft, ChevronRight } from 'lucide-react';
 import { PageHeading, RefreshTableButton } from '../StaffShared';
-import { useStaffSearch } from '../StaffLayout';
+import { useStaffSearch } from '../staffSearch';
 import { schemaApi } from '../../services/katalaApi';
 import { completeRecurringVisit, filterStaffItems, isRecurringService, today, upsertWorkflow, workflowItemsFromQueue } from '../staffWorkflow';
 import { useStaffMembers } from '../useStaffMembers';
@@ -65,6 +65,8 @@ function ServiceCalendarPage() {
     } else {
       await schemaApi.updateStaffServiceRequest(item.id, {
         status: workflowPatch.status || patch.status || item.status,
+        schedule: workflowPatch.schedule || patch.schedule || item.schedule || {},
+        assignedStaff: workflowPatch.schedule?.staff || patch.schedule?.staff || item.schedule?.staff || '',
         preferredDate: workflowPatch.schedule?.date || patch.schedule?.date || item.schedule?.date || '',
         preferredTime: workflowPatch.schedule?.time || patch.schedule?.time || item.schedule?.time || '',
         recurrenceFrequency: workflowPatch.recurrenceFrequency || item.recurrenceFrequency || 'One-time',

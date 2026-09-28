@@ -254,7 +254,8 @@ CREATE TABLE tbl_quotationstatushistory (
 
 CREATE TABLE tbl_paymenttransaction (
   v_paymenttransactionid varchar(36) PRIMARY KEY,
-  v_quotationid varchar(36) NOT NULL,
+  v_quotationid varchar(36),
+  v_servicerequestid varchar(36),
   v_userid varchar(36) NOT NULL,
   v_referencenumber varchar(80) NOT NULL UNIQUE,
   v_paymongo_checkoutsessionid varchar(120) UNIQUE,
@@ -295,6 +296,11 @@ CREATE TABLE tbl_servicerequest (
   v_requeststatus varchar(50) NOT NULL DEFAULT 'Submitted',
   v_customerremarks text,
   v_adminremarks text,
+  v_quotedamount decimal(12,2),
+  v_paymentstatus varchar(30),
+  v_receiptnumber varchar(80),
+  v_paidat datetime,
+  v_pricehistory json,
   v_submittedat datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
   v_completedat datetime,
   v_createdat datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -303,6 +309,10 @@ CREATE TABLE tbl_servicerequest (
   CONSTRAINT fk_sr_service FOREIGN KEY (v_serviceid) REFERENCES tbl_service(v_serviceid),
   CONSTRAINT fk_sr_address FOREIGN KEY (v_useraddressid) REFERENCES tbl_useraddress(v_useraddressid) ON DELETE SET NULL
 ) ENGINE=InnoDB;
+
+ALTER TABLE tbl_paymenttransaction
+  ADD CONSTRAINT fk_payment_service_request
+  FOREIGN KEY (v_servicerequestid) REFERENCES tbl_servicerequest(v_servicerequestid);
 
 CREATE TABLE tbl_servicerequeststatushistory (
   v_servicerequeststatushistoryid varchar(36) PRIMARY KEY,

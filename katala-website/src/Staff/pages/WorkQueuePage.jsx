@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Eye, Plus, Save, Trash2 } from 'lucide-react';
 import { PageHeading, RefreshTableButton, StatusBadge } from '../StaffShared';
-import { useStaffSearch } from '../StaffLayout';
+import { useStaffSearch } from '../staffSearch';
 import { schemaApi } from '../../services/katalaApi';
 import {
   chargeTypes,

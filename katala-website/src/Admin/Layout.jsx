@@ -1,15 +1,10 @@
 
-import { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Bell, CircleX, ClipboardList, Globe2, LayoutDashboard, LogOut, Package, Search, Settings, User, Users, UserCog, Wrench } from 'lucide-react';
 import { authApi, getStoredSession } from '../services/katalaApi';
+import { AdminSearchContext, useAdminSearch } from './adminSearch';
 
-const AdminSearchContext = createContext({ query: '', normalizedQuery: '', setQuery: () => {}, clearQuery: () => {} })
-
-export function useAdminSearch() {
-  return useContext(AdminSearchContext)
-}
-
-export const Sidebar = ({ activeTab, onNavigate }) => {
+const Sidebar = ({ activeTab, onNavigate }) => {
   const navItems = [
     { name: 'Dashboard', icon: LayoutDashboard },
     { name: 'Accounts', icon: UserCog },
@@ -58,7 +53,7 @@ export const Sidebar = ({ activeTab, onNavigate }) => {
   );
 };
 
-export const TopBar = ({ title }) => {
+const TopBar = ({ title }) => {
   const { query, setQuery, clearQuery } = useAdminSearch()
   return (
   <header className="h-16 bg-white border-b border-slate-200 flex items-center justify-between px-8 ml-[260px] sticky top-0 z-40">

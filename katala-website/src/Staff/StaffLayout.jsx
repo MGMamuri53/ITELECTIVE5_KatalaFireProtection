@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Bell,
   CalendarDays,
@@ -15,6 +15,7 @@ import {
   UserRound,
 } from 'lucide-react';
 import { authApi, getStoredSession } from '../services/katalaApi';
+import { StaffSearchContext } from './staffSearch';
 
 const navItems = [
   { name: 'Work Queue', route: 'staff-work-queue', icon: ClipboardList },
@@ -25,12 +26,6 @@ const navItems = [
   { name: 'Completed', route: 'staff-completed', icon: CheckCircle2 },
   { name: 'Settings', route: 'staff-settings', icon: Settings },
 ];
-
-const StaffSearchContext = createContext({ query: '', normalizedQuery: '', setQuery: () => {}, clearQuery: () => {} });
-
-export function useStaffSearch() {
-  return useContext(StaffSearchContext);
-}
 
 function StaffLayout({ activePage, children }) {
   const [query, setQuery] = useState('');

@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { CheckCircle2, CalendarClock } from 'lucide-react';
 import { PageHeading, RefreshTableButton, SummaryCard } from '../StaffShared';
-import { useStaffSearch } from '../StaffLayout';
+import { useStaffSearch } from '../staffSearch';
 import { schemaApi } from '../../services/katalaApi';
 import { completeRecurringVisit, filterStaffItems, isRecurringService, recurrenceOptions, today, upsertWorkflow, workflowItemsFromQueue } from '../staffWorkflow';
 import { useStaffMembers } from '../useStaffMembers';
@@ -60,6 +60,8 @@ function MaintenancePage() {
       const quotedAmount = patch.quotation?.total ?? item.quotation?.total ?? item.totalAmount ?? '';
       await schemaApi.updateStaffServiceRequest(item.id, {
         status: workflowPatch.status || patch.status || item.status,
+        schedule: workflowPatch.schedule || patch.schedule || item.schedule || {},
+        assignedStaff: workflowPatch.schedule?.staff || patch.schedule?.staff || item.schedule?.staff || '',
         preferredDate: workflowPatch.schedule?.date || patch.schedule?.date || item.schedule?.date || '',
         preferredTime: workflowPatch.schedule?.time || patch.schedule?.time || item.schedule?.time || '',
         recurrenceFrequency: workflowPatch.recurrenceFrequency || patch.recurrenceFrequency || item.recurrenceFrequency || 'Monthly',

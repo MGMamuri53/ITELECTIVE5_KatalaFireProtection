@@ -3,7 +3,7 @@ import KatalaBrand from './KatalaBrand'
 import { company } from './data/company'
 import { authApi, getStoredSession } from './services/katalaApi'
 
-export const navItems = [
+const navItems = [
   ['products', 'Products'],
   ['services', 'Services'],
   ['portfolio', 'Projects'],

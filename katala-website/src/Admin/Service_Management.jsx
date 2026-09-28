@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Clock, Plus, Save, Trash2 } from 'lucide-react';
 import { schemaApi } from '../services/katalaApi';
-import { useAdminSearch } from './Layout';
+import { useAdminSearch } from './adminSearch';
 import { filterBySearch } from '../shared/search';
 
 const emptyService = {

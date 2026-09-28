@@ -1,6 +1,7 @@
 CREATE TABLE IF NOT EXISTS public.tbl_paymenttransaction (
   v_paymenttransactionid uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  v_quotationid uuid NOT NULL REFERENCES public.tbl_quotation(v_quotationid) ON DELETE RESTRICT,
+  v_quotationid uuid REFERENCES public.tbl_quotation(v_quotationid) ON DELETE RESTRICT,
+  v_servicerequestid uuid,
   v_userid uuid NOT NULL REFERENCES public.tbl_user(v_userid) ON DELETE RESTRICT,
   v_referencenumber character varying(80) NOT NULL UNIQUE,
   v_paymongo_checkoutsessionid character varying(120) UNIQUE,
@@ -23,11 +24,34 @@ CREATE TABLE IF NOT EXISTS public.tbl_paymenttransaction (
     CHECK (v_status IN ('Pending', 'Paid', 'Failed', 'Cancelled', 'Expired'))
 );
 
+ALTER TABLE public.tbl_paymenttransaction
+  ALTER COLUMN v_quotationid DROP NOT NULL;
+
+ALTER TABLE public.tbl_paymenttransaction
+  ADD COLUMN IF NOT EXISTS v_servicerequestid uuid;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+      FROM pg_constraint
+     WHERE conname = 'fk_paymenttransaction_service_request'
+  ) THEN
+    ALTER TABLE public.tbl_paymenttransaction
+      ADD CONSTRAINT fk_paymenttransaction_service_request
+      FOREIGN KEY (v_servicerequestid) REFERENCES public.tbl_servicerequest(v_servicerequestid)
+      ON DELETE RESTRICT;
+  END IF;
+END $$;
+
 CREATE INDEX IF NOT EXISTS idx_tbl_paymenttransaction_user
   ON public.tbl_paymenttransaction(v_userid);
 
 CREATE INDEX IF NOT EXISTS idx_tbl_paymenttransaction_quotation
   ON public.tbl_paymenttransaction(v_quotationid);
+
+CREATE INDEX IF NOT EXISTS idx_tbl_paymenttransaction_service_request
+  ON public.tbl_paymenttransaction(v_servicerequestid);
 
 CREATE INDEX IF NOT EXISTS idx_tbl_paymenttransaction_status
   ON public.tbl_paymenttransaction(v_status);

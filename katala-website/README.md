@@ -25,9 +25,26 @@ The React Compiler is not enabled on this template because of its impact on dev 
 
 If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and Oxlint's TypeScript related rules in your project.
 
+## Supabase Database
+
+Run `database/katala_supabase_schema.sql` in the Supabase SQL editor before
+starting the API. The app server connects to Supabase Postgres directly:
+
+```env
+SUPABASE_DB_URL=<your-supabase-pooler-connection-string>
+SUPABASE_DB_SSL=true
+VITE_SUPABASE_URL=<your-supabase-project-url>
+VITE_SUPABASE_ANON_KEY=<your-supabase-anon-public-key>
+APP_ORIGIN=http://localhost:5173
+```
+
+Use the Supabase **anon public** key for `VITE_SUPABASE_ANON_KEY`. Do not put a
+service role key in frontend variables.
+
 ## PayMongo Checkout
 
-Import the MySQL payment transaction table/migration in phpMyAdmin before accepting payments.
+Run the Supabase schema before accepting payments so `tbl_paymenttransaction`
+exists.
 
 Required server environment variables:
 
@@ -68,7 +85,7 @@ Local `http://localhost` can create test sessions, but Xendit return URLs must b
 
 ## Staff and Administrator Access
 
-The sign-in page supports Customer, Staff, and Administrator portals. Staff/admin accounts use the role assigned in the local MySQL `tbl_user` / `tbl_role` tables.
+The sign-in page supports Customer, Staff, and Administrator portals. Staff/admin accounts use the role assigned in the Supabase Postgres `tbl_user`, `tbl_role`, and `tbl_userrole` tables.
 
 For local/testing overrides, set comma-separated email allowlists in the API environment:
 

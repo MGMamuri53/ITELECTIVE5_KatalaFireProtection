@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Eye } from 'lucide-react';
 import { PageHeading, RefreshTableButton, TableHeader } from '../StaffShared';
-import { useStaffSearch } from '../StaffLayout';
+import { useStaffSearch } from '../staffSearch';
 import { schemaApi } from '../../services/katalaApi';
 import { filterStaffItems, isRecurringService, workflowItemsFromQueue } from '../staffWorkflow';
 

@@ -231,7 +231,7 @@ export const authApi = {
 
   async updatePassword(password) {
     void password
-    throw new Error('Password updates are not available for local MySQL auth yet.')
+    throw new Error('Password updates are not available for portal auth yet.')
   },
 
   async session() {

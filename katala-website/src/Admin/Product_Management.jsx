@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Filter, HelpCircle, PackagePlus, Save, Trash2 } from 'lucide-react';
 import { schemaApi } from '../services/katalaApi';
-import { useAdminSearch } from './Layout';
+import { useAdminSearch } from './adminSearch';
 
 const emptyForm = {
   name: '',

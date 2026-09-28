@@ -74,5 +74,5 @@ if (await isPortInUse(Number(process.env.PORT || 3001))) {
   shutdown(1)
 } else {
   start('api')
+  start('dev:web')
 }
-start('dev:web')

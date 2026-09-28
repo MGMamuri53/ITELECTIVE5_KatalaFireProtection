@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { ChatPanel, PageHeading, RefreshTableButton } from '../StaffShared';
-import { useStaffSearch } from '../StaffLayout';
+import { useStaffSearch } from '../staffSearch';
 import { threads } from '../staffData';
 import { filterStaffItems } from '../staffWorkflow';
 

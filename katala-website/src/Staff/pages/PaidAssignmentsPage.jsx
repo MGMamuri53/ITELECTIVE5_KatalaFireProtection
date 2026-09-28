@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { CalendarClock, CheckCircle2 } from 'lucide-react';
 import { PageHeading, RefreshTableButton, StatusBadge } from '../StaffShared';
-import { useStaffSearch } from '../StaffLayout';
+import { useStaffSearch } from '../staffSearch';
 import { schemaApi } from '../../services/katalaApi';
 import { completeRecurringVisit, filterStaffItems, isRecurringService, recurrenceOptions, today, upsertWorkflow, workflowItemsFromQueue } from '../staffWorkflow';
 import { useStaffMembers } from '../useStaffMembers';
@@ -58,6 +58,8 @@ function PaidAssignmentsPage() {
     } else {
       await schemaApi.updateStaffServiceRequest(item.id, {
         status: workflowPatch.status || patch.status || item.status,
+        schedule: workflowPatch.schedule || patch.schedule || item.schedule || {},
+        assignedStaff: workflowPatch.schedule?.staff || patch.schedule?.staff || item.schedule?.staff || '',
         preferredDate: workflowPatch.schedule?.date || patch.schedule?.date || item.schedule?.date || '',
         preferredTime: workflowPatch.schedule?.time || patch.schedule?.time || item.schedule?.time || '',
         recurrenceFrequency: workflowPatch.recurrenceFrequency || patch.recurrenceFrequency || item.recurrenceFrequency || 'One-time',

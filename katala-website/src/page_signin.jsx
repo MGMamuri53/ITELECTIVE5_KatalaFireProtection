@@ -52,7 +52,9 @@ export default function Signin() {
       sessionStorage.removeItem('katala-signin-email')
       const role = data.user?.role || 'customer'
       const defaultPage = defaultPageForRole(role)
-      const savedReturnPage = sessionStorage.getItem('katala-return-after-auth') || defaultPage
+      const savedReturnPage = role === 'admin'
+        ? defaultPage
+        : sessionStorage.getItem('katala-return-after-auth') || defaultPage
       const returnPage = canAccessReturnPage(savedReturnPage, role) ? savedReturnPage : defaultPage
       sessionStorage.removeItem('katala-return-after-auth')
       sessionStorage.removeItem('katala-login-in-progress')
@@ -65,6 +67,8 @@ export default function Signin() {
         message = 'Verify your email first. Open the verification message sent to your email address, then sign in again.'
       } else if (/invalid login credentials|invalid credentials/i.test(raw)) {
         message = 'Incorrect email address or password.'
+      } else if (/supabase rejected|database credentials|28P01/i.test(raw)) {
+        message = 'The portal database is not accepting the configured server credentials yet. Please ask the administrator to update SUPABASE_DB_URL, then try again.'
       } else if (error instanceof TypeError) {
         message = 'Unable to connect to the local API. Please check that the API server and database are running.'
       }

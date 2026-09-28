@@ -497,7 +497,7 @@ function PaymentDialog({ item, onClose }) {
     if (!qrReady) return
     const link = document.createElement('a')
     link.href = qrPhPaymentConfig.qrImageSrc
-    link.download = `katala-qrph-${item.referenceNumber}.png`
+    link.download = `katala-qrph-${item.referenceNumber}.jpg`
     document.body.appendChild(link)
     link.click()
     link.remove()
@@ -644,7 +644,7 @@ function PaymentDialog({ item, onClose }) {
                   </div>
                   <ol className="qr-instruction-list">
                     <li>Open a compatible banking or e-wallet app.</li>
-                    <li>Scan or upload the QR PH image once Katala provides it.</li>
+                    <li>Scan or upload the displayed QR PH image.</li>
                     <li>Verify the recipient and enter the exact amount shown here if required.</li>
                     <li>Include the order reference if your app allows notes.</li>
                     <li>Complete payment and wait for Katala verification.</li>

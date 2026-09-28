@@ -6,14 +6,18 @@
   "scripts": {
     "dev": "node scripts/dev.mjs",
     "api": "node src/server.js",
+    "check:db": "node scripts/check-db.mjs",
+    "sync:schema": "node scripts/sync-supabase-app-schema.mjs",
     "build": "vite build",
     "lint": "oxlint",
     "preview": "vite preview",
     "dev:web": "vite"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.117.2",
+    "bcryptjs": "^3.0.3",
     "dotenv": "^17.0.0",
-    "mysql2": "^3.24.2",
+    "pg": "^8.23.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8"
   },

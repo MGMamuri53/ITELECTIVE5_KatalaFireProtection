@@ -88,7 +88,10 @@ export default function App() {
       // local portal session is available.
       if (session?.token && (route === 'signup' || route === 'signin')) {
         if (route === 'signin' && sessionStorage.getItem('katala-login-in-progress')) return
-        const savedReturnPage = sessionStorage.getItem('katala-return-after-auth') || defaultRouteForRole(role)
+        const defaultRoute = defaultRouteForRole(role)
+        const savedReturnPage = role === 'admin'
+          ? defaultRoute
+          : sessionStorage.getItem('katala-return-after-auth') || defaultRoute
         const returnPage = safeRouteForRole(savedReturnPage, role, Boolean(session?.token))
         sessionStorage.removeItem('katala-return-after-auth')
         location.hash = returnPage
