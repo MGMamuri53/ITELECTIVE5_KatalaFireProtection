@@ -21,8 +21,29 @@ function CompletedPage() {
   async function load(showLoading = true) {
     if (showLoading) setStatus({ type: 'loading', message: 'Loading completed work...' });
     try {
-      const data = await schemaApi.listStaffRequests();
+      const [data, paymentData] = await Promise.all([
+        schemaApi.listStaffRequests(),
+        schemaApi.listStaffPaymentConfirmations(),
+      ]);
+      const paymentByRequest = new Map((paymentData.items || []).map((payment) => [payment.requestReference, payment]));
       const rows = workflowItemsFromQueue(data.items || [])
+        .map((item) => {
+          const payment = paymentByRequest.get(item.id || item.referenceNumber);
+          if (!payment) return item;
+          return {
+            ...item,
+            payment: {
+              ...(item.payment || {}),
+              referenceNumber: payment.paymentReference,
+              providerReference: payment.providerReference,
+              method: payment.paymentMethod,
+              status: payment.status,
+              receiptNumber: payment.receiptNumber,
+              paidAt: payment.paidAt || payment.submittedAt,
+              proofImage: payment.proofImage,
+            },
+          };
+        })
         .filter((item) => item.status === 'Completed')
         .filter((item) => !isRecurringService(item) || item.maintenanceClosed);
       setItems(rows);
@@ -43,14 +64,15 @@ function CompletedPage() {
       />
       {status.type !== 'idle' && <Notice status={status} />}
       <section className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
-        <TableHeader columns={['Reference', 'Customer', 'Project', 'Type', 'Completed', 'Action']} />
+        <TableHeader columns={['Reference', 'Customer', 'Project', 'Type', 'Payment', 'Completed', 'Action']} />
         <div className="divide-y divide-slate-100">
           {shown.map((item) => (
-            <div key={item.id} className="grid grid-cols-1 md:grid-cols-6 gap-3 md:gap-4 px-5 md:px-6 py-5 items-center hover:bg-slate-50/50 transition-colors">
+            <div key={item.id} className="grid grid-cols-1 md:grid-cols-7 gap-3 md:gap-4 px-5 md:px-6 py-5 items-center hover:bg-slate-50/50 transition-colors">
               <span className="text-sm font-bold text-[#b3000c]">{item.id}</span>
               <span className="text-sm font-medium text-slate-900">{item.customer}</span>
               <span className="text-sm text-slate-600">{projectName(item)}</span>
               <span className="text-sm text-slate-600">{item.maintenanceClosed ? 'Maintenance' : item.kind}</span>
+              <span className="text-sm text-slate-600">{item.payment?.method || item.payment?.paymentMethod || 'Not recorded'}</span>
               <span className="text-sm text-slate-600">{formatDate(item.maintenanceEndedAt || item.updatedAt)}</span>
               <button type="button" className="inline-flex w-fit items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-sm font-bold text-slate-700 hover:bg-slate-50" onClick={() => setSelected(item)}>
                 <Eye className="w-4 h-4" /> Full details
@@ -108,6 +130,24 @@ function CompletedDetails({ item, onClose }) {
             <Detail label="Assigned staff" value={schedule.staff || item.staff || 'Not assigned'} />
             <Detail label="Completed" value={formatDateTime(item.completedAt || item.maintenanceEndedAt || item.updatedAt)} />
             <Detail label="Address" value={item.projectAddress || 'Not provided'} wide />
+          </div>
+          <div className="rounded-lg border border-slate-200 p-4">
+            <h3 className="mb-3 text-sm font-bold text-slate-900">Payment confirmation</h3>
+            {item.payment ? <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <Detail label="Customer" value={item.customer} />
+              <Detail label="Payment option" value={item.payment.method || item.payment.paymentMethod || 'Not recorded'} />
+              <Detail label="Katala payment reference" value={item.payment.referenceNumber || 'Not recorded'} />
+              <Detail label="Customer transaction reference" value={item.payment.providerReference || 'Not recorded'} />
+              <Detail label="Receipt number" value={item.payment.receiptNumber || 'Not recorded'} />
+              <Detail label="Payment status" value={item.payment.status || 'Not recorded'} />
+              <Detail label="Paid date" value={item.payment.paidAt ? formatDateTime(item.payment.paidAt) : 'Not recorded'} wide />
+              {item.payment.proofImage && <div className="sm:col-span-2">
+                <p className="mb-2 text-[10px] font-bold uppercase text-slate-400">Receipt image</p>
+                <a href={item.payment.proofImage} target="_blank" rel="noreferrer" title="Open receipt image">
+                  <img className="max-h-[480px] w-full rounded-lg border border-slate-200 bg-slate-50 object-contain" src={item.payment.proofImage} alt={`Payment receipt submitted by ${item.customer}`} />
+                </a>
+              </div>}
+            </div> : <p className="text-sm text-slate-500">No payment confirmation is linked to this completed item.</p>}
           </div>
           <div className="rounded-lg border border-slate-200 p-4">
             <h3 className="mb-3 text-sm font-bold text-slate-900">Quotation</h3>

@@ -6,13 +6,13 @@ import Services from './page_services'
 import Portfolio from './page_portfolio'
 import Company from './page_company_profile'
 import AdminPanel from './Admin/AdminPanel'
-import StaffPanel, { StaffCompleted, StaffMaintenance, StaffMessages, StaffPaidAssignments, StaffServiceCalendar, StaffSettings, StaffWorkQueue } from './Staff/StaffPanel'
+import StaffPanel, { StaffCompleted, StaffMaintenance, StaffPaymentConfirmations, StaffPaidAssignments, StaffServiceCalendar, StaffSettings, StaffWorkQueue } from './Staff/StaffPanel'
 import Profile from './page_profile'
 import Signup from './page_signup'
 import Signin from './page_signin'
 import { getStoredSession, isAuthReady } from './services/katalaApi'
 
-const staffRoutes = new Set(['staff', 'staff-work-queue', 'staff-messages', 'staff-paid-assignments', 'staff-service-calendar', 'staff-maintenance', 'staff-completed', 'staff-settings'])
+const staffRoutes = new Set(['staff', 'staff-work-queue', 'staff-payment-confirmations', 'staff-paid-assignments', 'staff-service-calendar', 'staff-maintenance', 'staff-completed', 'staff-settings'])
 const protectedRoutes = new Set(['admin', 'profile', ...staffRoutes])
 
 const routes = {
@@ -25,7 +25,7 @@ const routes = {
   admin: AdminPanel,
   staff: StaffPanel,
   'staff-work-queue': StaffWorkQueue,
-  'staff-messages': StaffMessages,
+  'staff-payment-confirmations': StaffPaymentConfirmations,
   'staff-paid-assignments': StaffPaidAssignments,
   'staff-service-calendar': StaffServiceCalendar,
   'staff-maintenance': StaffMaintenance,
@@ -46,7 +46,8 @@ function canAccessRoute(route, role, hasToken) {
   if (!hasToken) return false
   if (route === 'admin') return role === 'admin'
   if (staffRoutes.has(route)) return role === 'staff' || role === 'admin'
-  return route === 'profile'
+  if (route === 'profile') return role === 'customer'
+  return false
 }
 
 function safeRouteForRole(route, role, hasToken) {

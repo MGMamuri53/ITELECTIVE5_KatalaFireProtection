@@ -7,7 +7,7 @@ import {
   ClipboardCheck,
   ClipboardList,
   LogOut,
-  MessageSquare,
+  ReceiptText,
   Search,
   Settings,
   ShieldCheck,
@@ -19,7 +19,7 @@ import { StaffSearchContext } from './staffSearch';
 
 const navItems = [
   { name: 'Work Queue', route: 'staff-work-queue', icon: ClipboardList },
-  { name: 'Messages', route: 'staff-messages', icon: MessageSquare },
+  { name: 'Payment Confirmation', route: 'staff-payment-confirmations', icon: ReceiptText },
   { name: 'Paid Assignments', route: 'staff-paid-assignments', icon: ClipboardCheck },
   { name: 'Service Calendar', route: 'staff-service-calendar', icon: CalendarDays },
   { name: 'Maintenance', route: 'staff-maintenance', icon: ShieldCheck },

@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import building from './assets/pictures/download.jpg'
+import building from './assets/pictures/building-auth-enhanced.png'
 import shield from './assets/icons/shield.png'
 import KatalaBrand from './KatalaBrand'
 import { authApi } from './services/katalaApi'
@@ -9,7 +9,7 @@ function initialEmail() {
   return sessionStorage.getItem('katala-signin-email') || ''
 }
 
-const staffRoutes = new Set(['staff', 'staff-work-queue', 'staff-messages', 'staff-paid-assignments', 'staff-service-calendar', 'staff-maintenance', 'staff-completed', 'staff-settings'])
+const staffRoutes = new Set(['staff', 'staff-work-queue', 'staff-payment-confirmations', 'staff-paid-assignments', 'staff-service-calendar', 'staff-maintenance', 'staff-completed', 'staff-settings'])
 
 function defaultPageForRole(role) {
   if (role === 'admin') return 'admin'

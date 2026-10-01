@@ -8,6 +8,7 @@
     "api": "node src/server.js",
     "check:db": "node scripts/check-db.mjs",
     "sync:schema": "node scripts/sync-supabase-app-schema.mjs",
+    "sync:material-images": "node scripts/apply-material-images.mjs",
     "build": "vite build",
     "lint": "oxlint",
     "preview": "vite preview",

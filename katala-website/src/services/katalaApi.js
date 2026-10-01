@@ -304,20 +304,15 @@ export const schemaApi = {
     })
   },
 
-  createMockPayment(referenceNumber) {
-    return request(`/api/quotations/${encodeURIComponent(referenceNumber)}/mock-payment`, {
+  submitManualPayment(payload) {
+    return request('/api/payments/manual-proof', {
       method: 'POST',
+      body: JSON.stringify(payload),
     })
   },
 
   confirmServiceRequest(referenceNumber) {
     return request(`/api/service-requests/${encodeURIComponent(referenceNumber)}/confirm`, {
-      method: 'POST',
-    })
-  },
-
-  createServiceMockPayment(referenceNumber) {
-    return request(`/api/service-requests/${encodeURIComponent(referenceNumber)}/mock-payment`, {
       method: 'POST',
     })
   },
@@ -360,6 +355,17 @@ export const schemaApi = {
 
   listStaffMembers() {
     return request('/api/staff/members')
+  },
+
+  listStaffPaymentConfirmations() {
+    return request('/api/staff/payment-confirmations')
+  },
+
+  reviewStaffPayment(paymentReference, status) {
+    return request(`/api/staff/payment-confirmations/${encodeURIComponent(paymentReference)}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ status }),
+    })
   },
 
   updateStaffQuotation(referenceNumber, payload) {

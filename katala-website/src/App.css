@@ -1075,6 +1075,49 @@ img { max-width: 100%; }
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
 }
+.qr-action-row.single {
+  grid-template-columns: 1fr;
+}
+
+.payment-proof-form {
+  display: grid;
+  gap: 14px;
+}
+.payment-proof-form label {
+  display: grid;
+  gap: 7px;
+  color: var(--navy);
+  font-weight: 700;
+}
+.payment-proof-form input {
+  width: 100%;
+  min-height: 48px;
+  padding: 11px 13px;
+  border: 1px solid #cbd5e1;
+  border-radius: 10px;
+  background: #fff;
+  color: var(--navy);
+  font: inherit;
+}
+.payment-proof-form input:focus {
+  outline: 2px solid rgba(179, 0, 12, .18);
+  border-color: #b3000c;
+}
+.payment-proof-hint {
+  margin: 0;
+  color: #64748b;
+  font-size: .9rem;
+}
+
+.payment-proof-preview {
+  max-height: 320px;
+  width: 100%;
+  object-fit: contain;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  background: #fff;
+  padding: 8px;
+}
 .qr-recipient-box {
   display: grid;
   gap: 4px;

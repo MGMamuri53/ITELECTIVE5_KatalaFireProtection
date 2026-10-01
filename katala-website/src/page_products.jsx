@@ -1,14 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Nav, Footer, PageIntro, InfoNote } from './components'
 import { catalog, categories as baseCategories } from './data/catalog'
-import { isSignedIn, schemaApi } from './services/katalaApi'
+import { getStoredSession, isSignedIn, schemaApi } from './services/katalaApi'
 
 import extinguisherImage from './assets/pictures/06a07516-5478-4ffa-8cc9-27c057371c58.jpg'
 import detectorImage from './assets/pictures/d46f04a1-bcd1-4ea9-80c4-a2c23f357a63.jpg'
-import pumpImage from './assets/pictures/download (1).jpg'
-import facilityImage from './assets/pictures/94423466-9af4-4ef6-a238-a24c98a65c1e.jpg'
+import pumpImage from './assets/pictures/project-fire-pump-enhanced.png'
+import facilityImage from './assets/pictures/project-warehouse-enhanced.png'
 
 const CART_KEY = 'katala-cart-v3'
+const CART_OWNER_KEY = 'katala-cart-owner-v1'
 const QUOTATION_REFS_KEY = 'katala-quotation-refs-v1'
 const emptyCheckout = {
   projectName: '',
@@ -26,7 +27,7 @@ const imageByCategory = {
 }
 
 function productImage(product) {
-  return product.imageUrl || imageByCategory[product.category] || facilityImage
+  return product.imageUrl || product.image || imageByCategory[product.category] || facilityImage
 }
 
 function loadJson(key, fallback) {
@@ -36,6 +37,16 @@ function loadJson(key, fallback) {
   } catch {
     return fallback
   }
+}
+
+function currentCartOwner() {
+  return getStoredSession()?.user?.userId || ''
+}
+
+function loadAccountCart() {
+  const owner = currentCartOwner()
+  if (!owner || localStorage.getItem(CART_OWNER_KEY) !== owner) return []
+  return normalizeCart(loadJson(CART_KEY, []))
 }
 
 function normalizeCart(value) {
@@ -130,7 +141,7 @@ function selectedVariantDetail(product, variant) {
 }
 
 function materialProductKey(product) {
-  return [product.name].map(normalizeKey).join('::')
+  return [product.name, product.model].map(normalizeKey).join('::')
 }
 
 function materialProducts(materials) {
@@ -139,10 +150,11 @@ function materialProducts(materials) {
     .filter((material) => material.active)
     .forEach((material) => {
       const model = material.model || ''
-      const key = [material.productId || material.name].map(normalizeKey).join('::')
-      const variant = [model, material.size].filter(Boolean).join(' / ') || material.sku || material.unit || 'Standard'
+      // A model is one catalog card; only its size/mass choices are variants.
+      const key = [material.productId || material.name, model || material.sku].map(normalizeKey).join('::')
+      const variant = material.size || material.unit || 'Standard'
       const current = groups.get(key) || {
-        id: `db-${material.productId || material.variantId}`,
+        id: `db-${material.productId || material.variantId}-${model || material.sku}`,
         model: model || material.sku || '',
         name: material.name,
         category: material.category || 'Uncategorized',
@@ -180,17 +192,25 @@ export default function Products() {
   const [selected, setSelected] = useState(null)
   const [cartOpen, setCartOpen] = useState(false)
   const [manageOpen, setManageOpen] = useState(false)
-  const [cart, setCart] = useState(() => normalizeCart(loadJson(CART_KEY, [])))
+  const [cart, setCart] = useState(loadAccountCart)
   const [quotationRefs, setQuotationRefs] = useState(() => loadJson(QUOTATION_REFS_KEY, []))
   const [pendingAdd, setPendingAdd] = useState(null)
   const [returnPaymentReference, setReturnPaymentReference] = useState('')
   const [signedIn, setSignedIn] = useState(() => isSignedIn())
 
-  useEffect(() => localStorage.setItem(CART_KEY, JSON.stringify(cart)), [cart])
+  useEffect(() => {
+    const owner = currentCartOwner()
+    if (!owner) return
+    localStorage.setItem(CART_OWNER_KEY, owner)
+    localStorage.setItem(CART_KEY, JSON.stringify(cart))
+  }, [cart])
   useEffect(() => localStorage.setItem(QUOTATION_REFS_KEY, JSON.stringify(quotationRefs)), [quotationRefs])
 
   useEffect(() => {
-    const sync = () => setSignedIn(isSignedIn())
+    const sync = () => {
+      setSignedIn(isSignedIn())
+      setCart(loadAccountCart())
+    }
     window.addEventListener('katala-auth-changed', sync)
     window.addEventListener('storage', sync)
     return () => {

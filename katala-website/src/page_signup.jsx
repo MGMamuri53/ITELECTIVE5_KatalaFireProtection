@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import building from './assets/pictures/download.jpg'
+import building from './assets/pictures/building-auth-enhanced.png'
 import shield from './assets/icons/shield.png'
 import KatalaBrand from './KatalaBrand'
 import { authApi } from './services/katalaApi'

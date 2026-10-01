@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react'
-import { ArrowLeft, Building2, CheckCircle2, CreditCard, Download, Loader2, QrCode, Smartphone } from 'lucide-react'
+import { ArrowLeft, Building2, CheckCircle2, Download, Loader2, QrCode, Smartphone } from 'lucide-react'
 import { Footer, Nav, PageIntro } from './components'
 import { company } from './data/company'
-import { qrPhPaymentConfig } from './paymentConfig'
+import { bankPaymentConfig, ewalletPaymentConfig, qrPhPaymentConfig } from './paymentConfig'
 import { getStoredSession, schemaApi } from './services/katalaApi'
 import { buildReceipt, getWorkflow, normalizeQuotation, subscribeWorkflowChanges } from './Staff/staffWorkflow'
 
@@ -451,21 +451,14 @@ const paymentMethods = [
     name: 'E-wallet',
     description: 'GCash, Maya, and other wallet channels.',
     icon: Smartphone,
-    active: false,
+    active: true,
   },
   {
     id: 'bank',
     name: 'Bank transfer',
     description: 'Direct deposit or online bank transfer.',
     icon: Building2,
-    active: false,
-  },
-  {
-    id: 'card',
-    name: 'Credit / debit card',
-    description: 'Visa, Mastercard, and card payments.',
-    icon: CreditCard,
-    active: false,
+    active: true,
   },
 ]
 
@@ -474,6 +467,10 @@ function PaymentDialog({ item, onClose }) {
   const [view, setView] = useState('methods')
   const [qrLoadStatus, setQrLoadStatus] = useState(qrPhPaymentConfig.qrImageSrc ? 'loading' : 'missing')
   const [paymentNotice, setPaymentNotice] = useState('')
+  const [providerReference, setProviderReference] = useState('')
+  const [proofImage, setProofImage] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const [paymentSubmitted, setPaymentSubmitted] = useState(false)
   const quotation = item.quotation || normalizeQuotation({}, item)
   const total = Number(quotation.total || item.totalAmount || 0)
   const selected = paymentMethods.find((method) => method.id === selectedMethod) || paymentMethods[0]
@@ -488,7 +485,6 @@ function PaymentDialog({ item, onClose }) {
   }
 
   function continueToQr() {
-    if (selectedMethod !== 'qrph') return
     setView('qr')
     setPaymentNotice('')
   }
@@ -503,9 +499,46 @@ function PaymentDialog({ item, onClose }) {
     link.remove()
   }
 
-  function confirmPaid() {
-    if (!qrReady || paymentNotice) return
-    setPaymentNotice('Payment awaiting verification. Katala will confirm the payment before marking this order as paid.')
+  async function chooseProof(event) {
+    const file = event.target.files?.[0]
+    if (!file) return setProofImage('')
+    if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type) || file.size > 650_000) {
+      setProofImage('')
+      setPaymentNotice('Upload a PNG, JPG, or WebP image no larger than 650 KB.')
+      return
+    }
+    const reader = new FileReader()
+    reader.onload = () => setProofImage(String(reader.result || ''))
+    reader.readAsDataURL(file)
+  }
+
+  async function confirmPaid() {
+    if (submitting || paymentSubmitted) return
+    if (!providerReference.trim()) {
+      setPaymentNotice('Enter the transaction reference from your payment receipt.')
+      return
+    }
+    if (!proofImage) {
+      setPaymentNotice('Choose a payment screenshot or receipt image before submitting.')
+      return
+    }
+    setSubmitting(true)
+    setPaymentSubmitted(false)
+    setPaymentNotice('')
+    try {
+      const data = await schemaApi.submitManualPayment({
+        requestReference: item.referenceNumber,
+        paymentMethod: selectedMethod === 'qrph' ? 'QR PH' : selectedMethod === 'ewallet' ? 'GCash / E-wallet' : 'Bank transfer',
+        providerReference: providerReference.trim(),
+        proofImage,
+      })
+      setPaymentNotice(data.message || 'Payment proof submitted for staff verification.')
+      setPaymentSubmitted(true)
+    } catch (error) {
+      setPaymentNotice(error.message || 'Unable to submit payment proof.')
+    } finally {
+      setSubmitting(false)
+    }
   }
 
   return (
@@ -561,11 +594,7 @@ function PaymentDialog({ item, onClose }) {
                       <SelectedIcon size={20} aria-hidden="true" />
                       <strong>{selected.name}</strong>
                     </div>
-                    {selected.id === 'qrph' ? (
-                      <p>QR PH is available for this checkout. Continue to view the payment instructions and QR display area.</p>
-                    ) : (
-                      <p>This payment method is not available yet. Please use QR PH.</p>
-                    )}
+                    <p>Continue to view the payment details, then submit the transaction reference and screenshot from your completed payment.</p>
                   </div>
                 </div>
 
@@ -577,16 +606,16 @@ function PaymentDialog({ item, onClose }) {
                   <span>Amount due</span>
                   <strong>{formatPeso(total)}</strong>
                 </div>
-                <button className="btn primary" type="button" disabled={selectedMethod !== 'qrph'} onClick={continueToQr}>
-                  {selectedMethod === 'qrph' ? 'Continue with QR PH' : 'Unavailable'}
+                <button className="btn primary" type="button" onClick={continueToQr}>
+                  Continue with {selected.name}
                 </button>
               </div>
             </>
           ) : (
             <div className="qr-payment-view">
               <div className="checkout-payment-title">
-                <span className="eyebrow">QR PH</span>
-                <h2 id="profile-payment-title">Pay with QR PH</h2>
+                <span className="eyebrow">{selected.name}</span>
+                <h2 id="profile-payment-title">Pay with {selected.name}</h2>
                 <p>Use the exact amount and reference below when completing payment.</p>
               </div>
 
@@ -598,7 +627,7 @@ function PaymentDialog({ item, onClose }) {
                     <small>Order reference: {item.referenceNumber}</small>
                   </div>
 
-                  <div className="qr-display-area">
+                  {selectedMethod === 'qrph' && <div className="qr-display-area">
                     {hasQrImage ? (
                       <>
                         {qrLoadStatus === 'loading' && <div className="qr-placeholder"><Loader2 className="qr-spinner" size={28} aria-hidden="true" /> Loading QR image...</div>}
@@ -618,36 +647,47 @@ function PaymentDialog({ item, onClose }) {
                         <span>No scannable payment QR is configured yet.</span>
                       </div>
                     )}
-                  </div>
+                  </div>}
 
-                  <div className="qr-action-row">
-                    <button className="btn secondary" type="button" disabled={!qrReady} onClick={downloadQr}>
+                  {selectedMethod === 'ewallet' && <div className="qr-recipient-box"><span>GCash / E-wallet details</span><strong>{ewalletPaymentConfig.accountName || company.legalName}</strong><small>{ewalletPaymentConfig.accountNumber || 'Contact Katala for the account number.'}</small></div>}
+                  {selectedMethod === 'bank' && <div className="qr-recipient-box"><span>{bankPaymentConfig.bankName || 'Bank transfer details'}</span><strong>{bankPaymentConfig.accountName || company.legalName}</strong><small>{bankPaymentConfig.accountNumber || 'Contact Katala for the bank account number.'}</small></div>}
+
+                  <div className="payment-proof-form">
+                    <label><span>Payment reference number</span><input required maxLength="120" value={providerReference} onChange={(event) => setProviderReference(event.target.value)} placeholder="Enter the reference from your receipt" /></label>
+                    <label><span>Payment screenshot / receipt image</span><input required type="file" accept="image/png,image/jpeg,image/webp" onChange={chooseProof} /></label>
+                  </div>
+                  {proofImage && <img className="payment-proof-preview" src={proofImage} alt="Selected payment proof" />}
+
+                  <div className={`qr-action-row ${selectedMethod !== 'qrph' ? 'single' : ''}`}>
+                    {selectedMethod === 'qrph' && <button className="btn secondary" type="button" disabled={!qrReady} onClick={downloadQr}>
                       <Download size={17} aria-hidden="true" />
                       Download QR
-                    </button>
-                    <button className="btn primary" type="button" disabled={!qrReady || Boolean(paymentNotice)} onClick={confirmPaid}>
-                      I have paid
+                    </button>}
+                    <button className="btn primary" type="button" disabled={submitting || paymentSubmitted} onClick={confirmPaid}>
+                      {submitting ? 'Submitting...' : 'Submit payment confirmation'}
                     </button>
                   </div>
+                  {!paymentSubmitted && (!providerReference.trim() || !proofImage) && <p className="payment-proof-hint">Enter the payment reference and choose a receipt image to enable submission.</p>}
 
-                  {!hasQrImage && <div className="form-status loading">QR PH is prepared, but payment actions are disabled until the real QR image is configured.</div>}
-                  {qrLoadStatus === 'error' && <div className="form-status error">The configured QR image is missing or invalid. Payment actions remain disabled.</div>}
-                  {paymentNotice && <div className="form-status success">{paymentNotice}</div>}
+                  {selectedMethod === 'qrph' && !hasQrImage && <div className="form-status loading">QR PH is prepared, but no QR image is configured.</div>}
+                  {selectedMethod === 'qrph' && qrLoadStatus === 'error' && <div className="form-status error">The configured QR image is missing or invalid.</div>}
+                  {paymentNotice && <div className={`form-status ${paymentSubmitted ? 'success' : 'error'}`}>{paymentNotice}</div>}
                 </div>
 
                 <aside className="qr-side-panel">
                   <OrderSummary item={item} quotation={quotation} itemCount={itemCount} total={total} compact />
-                  <div className="qr-recipient-box">
+                  {selectedMethod === 'qrph' && <div className="qr-recipient-box">
                     <span>Recipient</span>
                     <strong>{qrPhPaymentConfig.recipientName || company.legalName}</strong>
                     <small>{qrPhPaymentConfig.recipientAccount || company.email}</small>
-                  </div>
+                  </div>}
                   <ol className="qr-instruction-list">
-                    <li>Open a compatible banking or e-wallet app.</li>
-                    <li>Scan or upload the displayed QR PH image.</li>
+                    <li>Open the selected payment app or bank.</li>
+                    <li>Use the payment details displayed on this page.</li>
                     <li>Verify the recipient and enter the exact amount shown here if required.</li>
                     <li>Include the order reference if your app allows notes.</li>
-                    <li>Complete payment and wait for Katala verification.</li>
+                    <li>Save the payment reference and a screenshot of the receipt.</li>
+                    <li>Submit both above and wait for Katala staff verification.</li>
                   </ol>
                   <p className="qr-payment-note">{qrPhPaymentConfig.note}</p>
                 </aside>

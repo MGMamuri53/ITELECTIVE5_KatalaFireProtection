@@ -94,6 +94,9 @@ export function overlayWorkflow(item) {
     ...workflow,
     status,
     quotation,
+    payment: item.payment || workflow.payment
+      ? { ...(workflow.payment || {}), ...(item.payment || {}) }
+      : null,
     schedule: workflow.schedule || scheduleFromItem(item),
     recurrenceFrequency: workflow.recurrenceFrequency || item.recurrenceFrequency || inferRecurrenceFrequency(item),
     serviceType: workflow.serviceType || inferServiceType(item),
@@ -225,6 +228,12 @@ export function staffSearchFields(item) {
     item.preferredTime,
     item.submittedAt,
     item.updatedAt,
+    item.payment?.method,
+    item.payment?.paymentMethod,
+    item.payment?.referenceNumber,
+    item.payment?.providerReference,
+    item.payment?.receiptNumber,
+    item.payment?.status,
     ...(Array.isArray(item.items) ? item.items.flatMap((line) => [
       line.productName,
       line.productCode,

@@ -2500,7 +2500,7 @@ async function handleConfirmQuotation(req, res, userId, referenceNumber) {
   return sendJson(res, 200, { ok: true, quotation })
 }
 
-async function handleMockQuotationPayment(req, res, userId, referenceNumber) {
+export async function handleMockQuotationPayment(req, res, userId, referenceNumber) {
   if (!(await requirePaymentTableReady(res))) return
   const result = await transaction(async (client) => {
     await ensureUserExists(client, userId)
@@ -2583,6 +2583,124 @@ async function handleMockQuotationPayment(req, res, userId, referenceNumber) {
   const quotation = await loadQuotation(userId, referenceNumber)
   const receipt = await loadReceipt(userId, payment.v_referencenumber)
   return sendJson(res, 200, { ok: true, quotation, payment: paymentStatusDto(payment), receipt })
+}
+
+function manualProofImage(value) {
+  const image = typeof value === 'string' ? value.trim() : ''
+  if (!/^data:image\/(png|jpe?g|webp);base64,[a-z0-9+/=]+$/i.test(image)) return null
+  return image.length <= 900_000 ? image : null
+}
+
+async function handleSubmitManualPayment(req, res, userId) {
+  if (!(await requirePaymentTableReady(res))) return
+  const body = await readBody(req, 1_000_000)
+  const requestReference = clean(body.requestReference, 80)
+  const providerReference = clean(body.providerReference, 120)
+  const paymentMethod = clean(body.paymentMethod, 40)
+  const proofImage = manualProofImage(body.proofImage)
+  if (!requestReference || providerReference.length < 4) return sendJson(res, 400, { error: 'Enter the payment reference from your receipt.' })
+  if (!['QR PH', 'GCash / E-wallet', 'Bank transfer'].includes(paymentMethod)) return sendJson(res, 400, { error: 'Choose a supported payment method.' })
+  if (!proofImage) return sendJson(res, 400, { error: 'Upload a PNG, JPG, or WebP payment screenshot under 650 KB.' })
+
+  const result = await transaction(async (client) => {
+    await ensureUserExists(client, userId)
+    const quotation = await loadPayableQuotation(client, userId, requestReference)
+    let quotationId = null
+    let serviceRequestId = null
+    let amount = quotation?.totalAmount || 0
+    let requestKind = 'Quotation'
+    if (!quotation) {
+      const service = await client.query(
+        `SELECT v_servicerequestid, v_quotedamount, v_requeststatus
+           FROM public.tbl_servicerequest
+          WHERE v_userid = $1 AND v_referencenumber = $2 LIMIT 1`,
+        [userId, requestReference],
+      )
+      if (!service.rowCount) return { notFound: true }
+      serviceRequestId = service.rows[0].v_servicerequestid
+      amount = toMoneyNumber(service.rows[0].v_quotedamount)
+      requestKind = 'Service'
+      if (String(service.rows[0].v_requeststatus).toLowerCase() !== 'customer confirmed' || amount <= 0) return { notPayable: true }
+    } else {
+      if (!quotation.canPay) return { notPayable: true }
+      const quotationRow = await client.query('SELECT v_quotationid FROM public.tbl_quotation WHERE v_userid = $1 AND v_referencenumber = $2 LIMIT 1', [userId, requestReference])
+      quotationId = quotationRow.rows[0]?.v_quotationid || null
+    }
+
+    const existing = await client.query(
+      `SELECT * FROM public.tbl_paymenttransaction
+        WHERE v_userid = $1 AND (v_quotationid = $2 OR v_servicerequestid = $3)
+        ORDER BY v_createdat DESC LIMIT 1`,
+      [userId, quotationId, serviceRequestId],
+    )
+    if (existing.rows[0]?.v_status === 'Paid') return { alreadyPaid: true }
+    const paymentReference = existing.rows[0]?.v_referencenumber || transactionReference(requestReference)
+    const payload = { manualProof: { providerReference, proofImage, requestReference, requestKind, submittedAt: new Date().toISOString() } }
+    const saved = existing.rowCount
+      ? await client.query(
+          `UPDATE public.tbl_paymenttransaction SET v_status = 'Awaiting Verification', v_amount = $2, v_paymentmethod = $3, v_rawpayload = $4, v_updatedat = NOW() WHERE v_paymenttransactionid = $1 RETURNING *`,
+          [existing.rows[0].v_paymenttransactionid, amount, paymentMethod, payload],
+        )
+      : await client.query(
+          `INSERT INTO public.tbl_paymenttransaction (v_quotationid, v_servicerequestid, v_userid, v_referencenumber, v_status, v_amount, v_currency, v_paymentmethod, v_rawpayload)
+           VALUES ($1, $2, $3, $4, 'Awaiting Verification', $5, 'PHP', $6, $7) RETURNING *`,
+          [quotationId, serviceRequestId, userId, paymentReference, amount, paymentMethod, payload],
+        )
+    return { payment: saved.rows[0] }
+  })
+  if (result.notFound) return sendJson(res, 404, { error: 'Quotation or service request not found.' })
+  if (result.notPayable) return sendJson(res, 409, { error: 'This request is not ready for payment.' })
+  if (result.alreadyPaid) return sendJson(res, 409, { error: 'This request is already paid.' })
+  return sendJson(res, 201, { ok: true, payment: paymentStatusDto(result.payment), message: 'Payment proof submitted for staff verification.' })
+}
+
+async function handleStaffPaymentConfirmations(req, res) {
+  const result = await pool.query(`
+    SELECT pt.*, COALESCE(q.v_referencenumber, sr.v_referencenumber) AS request_reference,
+           q.v_quotationstatus AS quotation_status, sr.v_requeststatus AS service_status,
+           u.v_firstname, u.v_lastname, u.v_emailaddress, u.v_companyname
+      FROM public.tbl_paymenttransaction pt
+      JOIN public.tbl_user u ON u.v_userid = pt.v_userid
+      LEFT JOIN public.tbl_quotation q ON q.v_quotationid = pt.v_quotationid
+      LEFT JOIN public.tbl_servicerequest sr ON sr.v_servicerequestid = pt.v_servicerequestid
+     WHERE pt.v_rawpayload->'manualProof' IS NOT NULL
+     ORDER BY pt.v_updatedat DESC`)
+  return sendJson(res, 200, { ok: true, items: result.rows.map((row) => ({
+    paymentReference: row.v_referencenumber,
+    requestReference: row.request_reference,
+    providerReference: row.v_rawpayload?.manualProof?.providerReference || '',
+    proofImage: row.v_rawpayload?.manualProof?.proofImage || '',
+    paymentMethod: row.v_paymentmethod || '',
+    status: row.v_status,
+    amount: toMoneyNumber(row.v_amount),
+    receiptNumber: row.v_receiptnumber || '',
+    paidAt: row.v_paidat || null,
+    customerName: customerName(row),
+    customerEmail: row.v_emailaddress || '',
+    submittedAt: row.v_rawpayload?.manualProof?.submittedAt || row.v_updatedat,
+    completed: String(row.quotation_status || row.service_status || '').toLowerCase() === 'completed',
+  })) })
+}
+
+async function handleStaffReviewPayment(req, res, staffUser, paymentReference) {
+  const body = await readBody(req)
+  const status = body.status === 'Paid' ? 'Paid' : body.status === 'Rejected' ? 'Rejected' : ''
+  if (!status) return sendJson(res, 400, { error: 'Payment status must be Paid or Rejected.' })
+  const result = await transaction(async (client) => {
+    const payment = await client.query(
+      `UPDATE public.tbl_paymenttransaction SET v_status = $2::varchar, v_receiptnumber = CASE WHEN $2::text = 'Paid' THEN COALESCE(v_receiptnumber, $3) ELSE v_receiptnumber END,
+              v_paidat = CASE WHEN $2::text = 'Paid' THEN COALESCE(v_paidat, NOW()) ELSE v_paidat END, v_updatedat = NOW()
+        WHERE v_referencenumber = $1 AND v_status = 'Awaiting Verification' RETURNING *`,
+      [paymentReference, status, receiptNumber()],
+    )
+    if (!payment.rowCount) return null
+    const row = payment.rows[0]
+    if (status === 'Paid' && row.v_quotationid) await client.query(`UPDATE public.tbl_quotation SET v_quotationstatus = 'Paid', v_updatedat = NOW() WHERE v_quotationid = $1`, [row.v_quotationid])
+    if (status === 'Paid' && row.v_servicerequestid) await client.query(`UPDATE public.tbl_servicerequest SET v_requeststatus = 'Paid', v_paymentstatus = 'Paid', v_receiptnumber = $2, v_paidat = NOW(), v_updatedat = NOW() WHERE v_servicerequestid = $1`, [row.v_servicerequestid, row.v_receiptnumber])
+    return row
+  })
+  if (!result) return sendJson(res, 409, { error: 'Payment confirmation is no longer awaiting verification.' })
+  return sendJson(res, 200, { ok: true, payment: paymentStatusDto(result), reviewedBy: staffUser.id })
 }
 
 function verifyPaymongoSignature(rawBody, signatureHeader) {
@@ -3192,7 +3310,7 @@ async function handleConfirmServiceRequest(req, res, userId, referenceNumber) {
   return sendJson(res, 200, { ok: true, serviceRequest })
 }
 
-async function handleMockServicePayment(req, res, userId, referenceNumber) {
+export async function handleMockServicePayment(req, res, userId, referenceNumber) {
   const result = await transaction(async (client) => {
     const columns = await tableColumns('tbl_servicerequest', client)
     if (!columns.has('v_quotedamount') || !columns.has('v_paymentstatus') || !columns.has('v_receiptnumber') || !columns.has('v_paidat')) {
@@ -3433,9 +3551,17 @@ async function customerNotifications(userId) {
 
 async function staffQuotationRows() {
   const result = await pool.query(
-    `SELECT q.*, u.v_firstname, u.v_lastname, u.v_emailaddress, u.v_companyname, u.v_contactnumber
+    `SELECT q.*, u.v_firstname, u.v_lastname, u.v_emailaddress, u.v_companyname, u.v_contactnumber,
+            pay.v_referencenumber AS payment_reference, pay.v_status AS payment_status,
+            pay.v_paymentmethod AS payment_method, pay.v_receiptnumber AS payment_receipt,
+            pay.v_paidat AS payment_paidat, pay.v_rawpayload AS payment_payload
        FROM public.tbl_quotation q
        JOIN public.tbl_user u ON u.v_userid = q.v_userid
+       LEFT JOIN LATERAL (
+         SELECT pt.* FROM public.tbl_paymenttransaction pt
+          WHERE pt.v_quotationid = q.v_quotationid
+          ORDER BY pt.v_updatedat DESC LIMIT 1
+       ) pay ON TRUE
       ORDER BY q.v_submittedat DESC
       LIMIT 100`,
   )
@@ -3488,7 +3614,10 @@ async function staffServiceRows() {
     `SELECT sr.*, s.v_servicename, u.v_firstname, u.v_lastname, u.v_emailaddress, u.v_companyname, u.v_contactnumber,
             appt.v_scheduleddate AS scheduled_date,
             appt.v_starttime AS scheduled_time,
-            COALESCE(NULLIF(TRIM(CONCAT_WS(' ', au.v_firstname, au.v_lastname)), ''), assn.v_assignmentremarks) AS assigned_staff
+            COALESCE(NULLIF(TRIM(CONCAT_WS(' ', au.v_firstname, au.v_lastname)), ''), assn.v_assignmentremarks) AS assigned_staff,
+            pay.v_referencenumber AS payment_reference, pay.v_status AS payment_status,
+            pay.v_paymentmethod AS payment_method, pay.v_receiptnumber AS payment_receipt,
+            pay.v_paidat AS payment_paidat, pay.v_rawpayload AS payment_payload
        FROM public.tbl_servicerequest sr
        JOIN public.tbl_service s ON s.v_serviceid = sr.v_serviceid
        JOIN public.tbl_user u ON u.v_userid = sr.v_userid
@@ -3507,6 +3636,11 @@ async function staffServiceRows() {
           LIMIT 1
        ) assn ON TRUE
        LEFT JOIN public.tbl_user au ON au.v_userid = assn.v_technicianuserid
+       LEFT JOIN LATERAL (
+         SELECT pt.* FROM public.tbl_paymenttransaction pt
+          WHERE pt.v_servicerequestid = sr.v_servicerequestid
+          ORDER BY pt.v_updatedat DESC LIMIT 1
+       ) pay ON TRUE
       ORDER BY sr.v_submittedat DESC
       LIMIT 100`,
   )
@@ -3594,6 +3728,14 @@ async function handleStaffWorkQueue(req, res) {
         additionalCost: totals.additionalCost,
         totalAmount: totals.totalAmount,
         items: rowItems,
+        payment: row.payment_reference ? {
+          referenceNumber: row.payment_reference,
+          providerReference: row.payment_payload?.manualProof?.providerReference || '',
+          method: row.payment_method || '',
+          status: row.payment_status || '',
+          receiptNumber: row.payment_receipt || '',
+          paidAt: row.payment_paidat || null,
+        } : null,
       }
     }),
     ...serviceRequests.map((row) => ({
@@ -3618,13 +3760,15 @@ async function handleStaffWorkQueue(req, res) {
       problemDescription: row.v_problemdescription,
       totalAmount: row.v_quotedamount === null || row.v_quotedamount === undefined ? null : toMoneyNumber(row.v_quotedamount),
       quotation: row.v_quotedamount === null || row.v_quotedamount === undefined ? null : serviceQuotationDto(row, row.v_servicename, toMoneyNumber(row.v_quotedamount)),
-      payment: row.v_paymentstatus ? {
-        referenceNumber: row.v_referencenumber,
-        status: row.v_paymentstatus,
+      payment: row.payment_reference || row.v_paymentstatus ? {
+        referenceNumber: row.payment_reference || row.v_referencenumber,
+        providerReference: row.payment_payload?.manualProof?.providerReference || '',
+        method: row.payment_method || '',
+        status: row.payment_status || row.v_paymentstatus,
         amount: toMoneyNumber(row.v_quotedamount),
         currency: 'PHP',
-        receiptNumber: row.v_receiptnumber || '',
-        paidAt: row.v_paidat || null,
+        receiptNumber: row.payment_receipt || row.v_receiptnumber || '',
+        paidAt: row.payment_paidat || row.v_paidat || null,
       } : null,
     })),
   ].sort((a, b) => new Date(b.submittedAt || 0) - new Date(a.submittedAt || 0))
@@ -4234,14 +4378,13 @@ const server = http.createServer(async (req, res) => {
   if (isRateLimited(req, url)) return sendJson(res, 429, { error: 'Too many requests. Please wait a few seconds and try again.' })
   const quotationMatch = url.pathname.match(/^\/api\/quotations\/([^/]+)$/)
   const quotationConfirmMatch = url.pathname.match(/^\/api\/quotations\/([^/]+)\/confirm$/)
-  const quotationMockPaymentMatch = url.pathname.match(/^\/api\/quotations\/([^/]+)\/mock-payment$/)
   const quotationCheckoutMatch = url.pathname.match(/^\/api\/quotations\/([^/]+)\/paymongo-checkout$/)
   const quotationXenditCheckoutMatch = url.pathname.match(/^\/api\/quotations\/([^/]+)\/xendit-checkout$/)
   const serviceRequestMatch = url.pathname.match(/^\/api\/service-requests\/([^/]+)$/)
   const serviceRequestConfirmMatch = url.pathname.match(/^\/api\/service-requests\/([^/]+)\/confirm$/)
-  const serviceRequestMockPaymentMatch = url.pathname.match(/^\/api\/service-requests\/([^/]+)\/mock-payment$/)
   const staffQuotationMatch = url.pathname.match(/^\/api\/staff\/quotations\/([^/]+)$/)
   const staffServiceRequestMatch = url.pathname.match(/^\/api\/staff\/service-requests\/([^/]+)$/)
+  const staffPaymentConfirmationMatch = url.pathname.match(/^\/api\/staff\/payment-confirmations\/([^/]+)$/)
   const adminMaterialMatch = url.pathname.match(/^\/api\/admin\/materials\/([^/]+)$/)
   const adminServiceMatch = url.pathname.match(/^\/api\/admin\/services\/([^/]+)$/)
   const adminAccountMatch = url.pathname.match(/^\/api\/admin\/accounts\/([^/]+)$/)
@@ -4317,6 +4460,8 @@ const server = http.createServer(async (req, res) => {
 
         if (req.method === 'GET' && url.pathname === '/api/staff/work-queue') return await handleStaffWorkQueue(req, res)
         if (req.method === 'GET' && url.pathname === '/api/staff/members') return await handleListStaffMembers(req, res)
+        if (req.method === 'GET' && url.pathname === '/api/staff/payment-confirmations') return await handleStaffPaymentConfirmations(req, res)
+        if (staffPaymentConfirmationMatch && req.method === 'PATCH') return await handleStaffReviewPayment(req, res, staffUser, decodeURIComponent(staffPaymentConfirmationMatch[1]))
         if (staffQuotationMatch && req.method === 'PATCH') return await handleStaffUpdateQuotation(req, res, staffUser, decodeURIComponent(staffQuotationMatch[1]))
         if (staffServiceRequestMatch && req.method === 'PATCH') return await handleStaffUpdateServiceRequest(req, res, staffUser, decodeURIComponent(staffServiceRequestMatch[1]))
       }
@@ -4339,10 +4484,10 @@ const server = http.createServer(async (req, res) => {
 
       if (req.method === 'GET' && url.pathname === '/api/auth/session') return await handleSession(req, res, customerUser)
       if (req.method === 'GET' && url.pathname === '/api/customer/inbox') return await handleCustomerInbox(req, res, userId)
+      if (req.method === 'POST' && url.pathname === '/api/payments/manual-proof') return await handleSubmitManualPayment(req, res, userId)
 
       if (req.method === 'POST' && url.pathname === '/api/quotations') return await handleCreateQuotation(req, res, userId)
       if (quotationConfirmMatch && req.method === 'POST') return await handleConfirmQuotation(req, res, userId, decodeURIComponent(quotationConfirmMatch[1]))
-      if (quotationMockPaymentMatch && req.method === 'POST') return await handleMockQuotationPayment(req, res, userId, decodeURIComponent(quotationMockPaymentMatch[1]))
       if (quotationCheckoutMatch && req.method === 'POST') return await handleCreatePaymongoCheckout(req, res, userId, decodeURIComponent(quotationCheckoutMatch[1]))
       if (quotationXenditCheckoutMatch && req.method === 'POST') return await handleCreateXenditCheckout(req, res, userId, decodeURIComponent(quotationXenditCheckoutMatch[1]))
       if (quotationMatch && req.method === 'GET') return await handleGetQuotation(req, res, userId, decodeURIComponent(quotationMatch[1]))
@@ -4354,7 +4499,6 @@ const server = http.createServer(async (req, res) => {
 
       if (req.method === 'POST' && url.pathname === '/api/service-requests') return await handleCreateServiceRequest(req, res, userId)
       if (serviceRequestConfirmMatch && req.method === 'POST') return await handleConfirmServiceRequest(req, res, userId, decodeURIComponent(serviceRequestConfirmMatch[1]))
-      if (serviceRequestMockPaymentMatch && req.method === 'POST') return await handleMockServicePayment(req, res, userId, decodeURIComponent(serviceRequestMockPaymentMatch[1]))
       if (serviceRequestMatch && req.method === 'GET') return await handleGetServiceRequest(req, res, userId, decodeURIComponent(serviceRequestMatch[1]))
       if (serviceRequestMatch && req.method === 'PATCH') return await handleUpdateServiceRequest(req, res, userId, decodeURIComponent(serviceRequestMatch[1]))
       if (serviceRequestMatch && req.method === 'DELETE') return await handleCancelServiceRequest(req, res, userId, decodeURIComponent(serviceRequestMatch[1]))
