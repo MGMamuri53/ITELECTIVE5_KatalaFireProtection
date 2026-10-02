@@ -382,7 +382,7 @@ async function localAuthUserByEmail(email, client = pool) {
   const roleSelect = roleJoin && roleNameColumn ? `r.${q(roleNameColumn)} AS role_name` : 'NULL AS role_name'
   const usernameFilter = usernameColumn ? `OR LOWER(u.${q(usernameColumn)}::text) = LOWER($1)` : ''
 
-  const result = hasLocalAuthAccounts
+  let result = hasLocalAuthAccounts
     ? await client.query(
       `SELECT u.${q(userIdColumn)} AS v_userid,
               la.v_passwordhash AS v_passwordhash,
@@ -417,6 +417,25 @@ async function localAuthUserByEmail(email, client = pool) {
         LIMIT 1`,
       [email],
     )
+  if (hasLocalAuthAccounts && !result.rowCount) {
+    result = await client.query(
+      `SELECT u.${q(userIdColumn)} AS v_userid,
+              u.${q(passwordColumn)} AS v_passwordhash,
+              u.${q(firstNameColumn)} AS v_firstname,
+              u.${q(lastNameColumn)} AS v_lastname,
+              u.${q(emailColumn)} AS v_emailaddress,
+              ${optionalSelect(userColumns, ['v_contactnumber', 'v_mobilenumber'], 'v_contactnumber')},
+              u.${q(statusColumn)} AS v_accountstatus,
+              ${optionalSelect(userColumns, ['v_companyname'], 'v_companyname')},
+              ${roleSelect}
+         FROM public.tbl_user u
+         ${roleJoin}
+        WHERE LOWER(u.${q(emailColumn)}::text) = LOWER($1)
+           ${usernameFilter}
+        LIMIT 1`,
+      [email],
+    )
+  }
   const row = result.rows[0]
   if (!row) return null
   return {
@@ -773,6 +792,7 @@ async function handleRegisterProfile(req, res) {
   const email = clean(body.email, 180).toLowerCase()
   const firstName = clean(body.firstName, 120)
   const lastName = clean(body.lastName, 120)
+  const password = String(body.password || '')
   const accountType = configuredPortalRole(email) || publicSignupRole(body.accountType)
   const status = accountType === 'staff' && !configuredPortalRole(email) ? 'Pending' : 'Active'
 
@@ -780,13 +800,18 @@ async function handleRegisterProfile(req, res) {
   if (!firstName || !lastName || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
     return sendJson(res, 400, { error: 'Complete the required signup fields.' })
   }
+  if (password && password.length < 6) return sendJson(res, 400, { error: 'Password must be at least 6 characters.' })
 
+  const passwordHash = password ? await hashPassword(password) : null
   const result = await transaction(async (client) => {
+    const userColumns = await tableColumns('tbl_user', client)
+    const hasLocalAuthAccounts = await tableExists('local_auth_accounts', client)
     const inserted = await client.query(
       `INSERT INTO public.tbl_user
         (v_userid, v_firstname, v_lastname, v_emailaddress, v_contactnumber,
-         v_accountstatus, v_companyname, v_jobtitle, v_industry, v_companyaddress)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+         v_accountstatus, v_companyname, v_jobtitle, v_industry, v_companyaddress,
+         v_username, v_passwordhash)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
        ON CONFLICT (v_userid) DO UPDATE SET
          v_firstname = EXCLUDED.v_firstname,
          v_lastname = EXCLUDED.v_lastname,
@@ -796,6 +821,8 @@ async function handleRegisterProfile(req, res) {
          v_jobtitle = EXCLUDED.v_jobtitle,
          v_industry = EXCLUDED.v_industry,
          v_companyaddress = EXCLUDED.v_companyaddress,
+         v_username = COALESCE(EXCLUDED.v_username, public.tbl_user.v_username),
+         v_passwordhash = COALESCE(EXCLUDED.v_passwordhash, public.tbl_user.v_passwordhash),
          v_updatedat = now()
        RETURNING v_userid, v_accountstatus`,
       [
@@ -809,8 +836,20 @@ async function handleRegisterProfile(req, res) {
         nullable(body.jobTitle, 120),
         nullable(body.industry, 120),
         nullable(body.companyAddress, 500),
+        userColumns.has('v_username') ? email : null,
+        userColumns.has('v_passwordhash') ? passwordHash : null,
       ],
     )
+    if (passwordHash && hasLocalAuthAccounts) {
+      await client.query(
+        `INSERT INTO public.local_auth_accounts (v_userid, v_emailaddress, v_passwordhash)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (v_userid) DO UPDATE SET
+           v_emailaddress = EXCLUDED.v_emailaddress,
+           v_passwordhash = EXCLUDED.v_passwordhash`,
+        [userId, email, passwordHash],
+      )
+    }
     await assignSingleRole(client, userId, accountType)
     return inserted.rows[0]
   })

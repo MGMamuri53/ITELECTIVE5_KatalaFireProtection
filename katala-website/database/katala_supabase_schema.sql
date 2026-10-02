@@ -61,6 +61,28 @@ CREATE TABLE public.local_auth_accounts (
   v_createdat timestamptz NOT NULL DEFAULT now()
 );
 
+CREATE OR REPLACE FUNCTION public.katala_sync_local_auth_account()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF NEW.v_userid IS NOT NULL
+    AND NEW.v_emailaddress IS NOT NULL
+    AND NEW.v_passwordhash IS NOT NULL THEN
+    INSERT INTO public.local_auth_accounts (v_userid, v_emailaddress, v_passwordhash)
+    VALUES (NEW.v_userid, NEW.v_emailaddress, NEW.v_passwordhash)
+    ON CONFLICT (v_userid) DO UPDATE SET
+      v_emailaddress = EXCLUDED.v_emailaddress,
+      v_passwordhash = EXCLUDED.v_passwordhash;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER katala_sync_local_auth_account
+AFTER INSERT OR UPDATE OF v_userid, v_emailaddress, v_passwordhash ON public.tbl_user
+FOR EACH ROW EXECUTE FUNCTION public.katala_sync_local_auth_account();
+
 CREATE TABLE public.tbl_userrole (
   v_userroleid uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   v_userid uuid NOT NULL REFERENCES public.tbl_user(v_userid) ON DELETE CASCADE,

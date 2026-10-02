@@ -24,6 +24,15 @@
   },
   "homepage": "https://github.com/MGMamuri53/ITElect5_Katala_Website#readme",
   "devDependencies": {
+    "@vitejs/plugin-react": "^6.1.1",
     "vite": "^8.2.1"
+  },
+  "dependencies": {
+    "bcryptjs": "^3.0.3",
+    "dotenv": "^18.0.5",
+    "lucide-react": "^1.49.0",
+    "pg": "^8.23.1",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
   }
 }
