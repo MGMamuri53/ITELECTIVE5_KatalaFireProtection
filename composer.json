@@ -14,5 +14,8 @@
         "sort-packages": true
     },
     "minimum-stability": "stable",
-    "prefer-stable": true
+    "prefer-stable": true,
+    "require-dev": {
+        "barryvdh/laravel-debugbar": "^4.4"
+    }
 }

@@ -545,7 +545,11 @@ async function handleLocalSignup(req, res) {
 
     if (hasLocalAuthAccounts) {
       await client.query(
-        'INSERT INTO local_auth_accounts (v_userid, v_emailaddress, v_passwordhash) VALUES ($1, $2, $3)',
+        `INSERT INTO local_auth_accounts (v_userid, v_emailaddress, v_passwordhash)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (v_userid) DO UPDATE SET
+           v_emailaddress = EXCLUDED.v_emailaddress,
+           v_passwordhash = EXCLUDED.v_passwordhash`,
         [newUserId, email, passwordHash],
       )
     }
