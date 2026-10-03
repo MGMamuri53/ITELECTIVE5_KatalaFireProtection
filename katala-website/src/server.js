@@ -1,5 +1,7 @@
 import 'dotenv/config'
 import http from 'node:http'
+import { resolve } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { createHmac, randomBytes, randomUUID, scrypt as scryptCallback, timingSafeEqual } from 'node:crypto'
 import { promisify } from 'node:util'
 import bcrypt from 'bcryptjs'
@@ -4411,7 +4413,7 @@ async function reportDatabaseReadiness() {
   }
 }
 
-const server = http.createServer(async (req, res) => {
+export async function requestHandler(req, res) {
   setCors(req, res)
   if (req.method === 'OPTIONS') {
     res.writeHead(204)
@@ -4559,22 +4561,27 @@ const server = http.createServer(async (req, res) => {
     const friendly = friendlyDatabaseError(error)
     return sendJson(res, error.statusCode || 500, { error: friendly || 'Server/database error. No table was created or altered.' })
   }
-})
+}
 
-server.on('error', (error) => {
-  if (error.code === 'EADDRINUSE') {
-    console.error(`Port ${port} is already in use. Stop the existing API/dev server, then run npm run dev again.`)
+// Importing the handler in a Vercel Function must not start a local listener.
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  const server = http.createServer(requestHandler)
+
+  server.on('error', (error) => {
+    if (error.code === 'EADDRINUSE') {
+      console.error(`Port ${port} is already in use. Stop the existing API/dev server, then run npm run dev again.`)
+      process.exit(1)
+    }
+
+    console.error('API server failed to start:', error.message)
     process.exit(1)
-  }
+  })
 
-  console.error('API server failed to start:', error.message)
-  process.exit(1)
-})
-
-server.listen(port, () => {
-  console.log(`Katala API running on http://localhost:${port}`)
-  console.log(pool ? 'Database connection: configured' : 'Database connection: not configured')
-  console.log('Database provider: Supabase Postgres')
-  console.log('Auth provider: local portal auth')
-  void reportDatabaseReadiness()
-})
+  server.listen(port, () => {
+    console.log(`Katala API running on http://localhost:${port}`)
+    console.log(pool ? 'Database connection: configured' : 'Database connection: not configured')
+    console.log('Database provider: Supabase Postgres')
+    console.log('Auth provider: local portal auth')
+    void reportDatabaseReadiness()
+  })
+}
